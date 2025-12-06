@@ -16,7 +16,6 @@ load_dotenv()
 app = Flask(__name__)
 
 # --- CLOUD FIX: RE-CREATE CREDENTIALS FILE ---
-# This checks if the file is missing. If yes, it creates it from the secret variable.
 if not os.path.exists('credentials.json'):
     google_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
     if google_json:
@@ -27,7 +26,6 @@ if not os.path.exists('credentials.json'):
         print("WARNING: GOOGLE_CREDENTIALS_JSON not found!")
 
 # --- CONFIGURATION ---
-# Keys are pulled from the Server Settings (Environment Variables)
 TWILIO_SID = os.getenv('TWILIO_SID')
 TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
 TWILIO_WHATSAPP_NUMBER = 'whatsapp:+14155238886'
@@ -44,19 +42,20 @@ try:
         model = genai.GenerativeModel('gemini-2.0-flash')
     else:
         print("AI Error: Missing Google API Key")
+except Exception as e:
+    print(f"AI Warning: {e}")
 
 # 2. Twilio
 try:
     if TWILIO_SID and TWILIO_TOKEN:
         client = Client(TWILIO_SID, TWILIO_TOKEN)
 except Exception as e:
-    print(f"Twilio Error: {e}")
+    print(f"Twilio Warning: {e}")
 
 # 3. Calendar
 calendar_service = None
 try:
     SCOPES = ['https://www.googleapis.com/auth/calendar']
-    # Check if file exists now (it should, because of the fix above)
     if os.path.exists(SERVICE_ACCOUNT_FILE):
         creds = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES
@@ -102,7 +101,6 @@ def call_status():
     status = request.values.get('DialCallStatus', '')
     caller = request.values.get('From', '') 
     if status in ['no-answer', 'busy', 'failed', 'canceled']:
-        # Send first message (Hebrew)
         send_whatsapp(caller, "היי, הגעתם לאטליז בוארון. שמי אליס. איך אני יכולה לעזור?")
     from twilio.twiml.voice_response import VoiceResponse
     return str(VoiceResponse())
