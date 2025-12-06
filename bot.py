@@ -113,15 +113,19 @@ def whatsapp_reply():
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     print(f"User: {incoming_msg}")
-
+# שיפרנו את ההוראות כדי שהבוט לא יתבלבל
     tool_prompt = f"""
     Current Time: {current_time}
     User Message: "{incoming_msg}"
+    
     Analyze the user's message.
-    1. If they want to schedule/book/reserve something, extract the DATE and TIME in ISO format (YYYY-MM-DDTHH:MM:SS).
-    2. If they are just chatting, return "CHAT".
-    Output format: JSON ONLY.
-    Example: {{"action": "book", "iso_time": "2025-12-05T14:00:00"}}
+    1. If they want to schedule/book/reserve, extract ISO time.
+    2. If they are just chatting (hello, question, etc.), return action="chat".
+    
+    Output format: JSON ONLY. Do not write normal text.
+    
+    Example 1 (Booking): {{"action": "book", "iso_time": "2025-12-05T14:00:00"}}
+    Example 2 (Chatting): {{"action": "chat"}}
     """
     
     try:
