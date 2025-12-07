@@ -39,7 +39,7 @@ SERVICE_ACCOUNT_FILE = 'credentials.json'
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-flash-latest')
     else:
         print("AI Error: Missing Google API Key")
 except Exception as e:
