@@ -6,9 +6,10 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 import google.generativeai as genai
 
-# --- CALENDAR IMPORTS ---
+# --- GOOGLE IMPORTS ---
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import gspread # <--- NEW for Sheets
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -19,11 +20,8 @@ app = Flask(__name__)
 if not os.path.exists('credentials.json'):
     google_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
     if google_json:
-        print("Creating credentials.json from Environment Variable...")
         with open('credentials.json', 'w') as f:
             f.write(google_json)
-    else:
-        print("WARNING: GOOGLE_CREDENTIALS_JSON not found!")
 
 # --- CONFIGURATION ---
 TWILIO_SID = os.getenv('TWILIO_SID')
@@ -33,15 +31,14 @@ MY_REAL_PHONE = os.getenv('MY_REAL_PHONE')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SERVICE_ACCOUNT_FILE = 'credentials.json'
+SHEET_NAME = "Butcher Shop Orders" # <--- Must match your Sheet Name exactly
 
 # --- SETUP CLIENTS ---
 # 1. AI
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest')
-    else:
-        print("AI Error: Missing Google API Key")
+        model = genai.GenerativeModel('gemini-flash-latest') # Safe model
 except Exception as e:
     print(f"AI Warning: {e}")
 
@@ -52,25 +49,29 @@ try:
 except Exception as e:
     print(f"Twilio Warning: {e}")
 
-# 3. Calendar
+# 3. Google Services (Calendar + Sheets)
 calendar_service = None
-try:
-    SCOPES = ['https://www.googleapis.com/auth/calendar']
-    if os.path.exists(SERVICE_ACCOUNT_FILE):
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_FILE, scopes=SCOPES
-        )
-        calendar_service = build('calendar', 'v3', credentials=creds)
-        print("✅ Calendar Connected!")
-    else:
-        print("❌ Calendar Error: credentials.json still missing.")
-except Exception as e:
-    print(f"❌ Calendar Error: {e}")
+sheet_service = None
 
-# --- HELPER FUNCTION: BOOK MEETING ---
+try:
+    if os.path.exists(SERVICE_ACCOUNT_FILE):
+        # Setup Calendar
+        cal_scopes = ['https://www.googleapis.com/auth/calendar']
+        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=cal_scopes)
+        calendar_service = build('calendar', 'v3', credentials=creds)
+        
+        # Setup Sheets
+        gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+        sheet_service = gc.open(SHEET_NAME).sheet1
+        print("✅ Google Services Connected!")
+    else:
+        print("❌ Error: credentials.json missing.")
+except Exception as e:
+    print(f"❌ Google Error: {e}")
+
+# --- HELPER 1: BOOK MEETING ---
 def book_meeting(event_summary, event_time_iso):
-    if not calendar_service:
-        return False
+    if not calendar_service: return False
     try:
         start_dt = datetime.datetime.fromisoformat(event_time_iso)
         end_dt = start_dt + datetime.timedelta(hours=1)
@@ -85,14 +86,25 @@ def book_meeting(event_summary, event_time_iso):
         print(f"Booking failed: {e}")
         return False
 
+# --- HELPER 2: WRITE ORDER TO SHEET ---
+def write_order(customer_phone, order_items):
+    if not sheet_service: return False
+    try:
+        # Row: Date | Phone | Items | Status
+        date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        sheet_service.append_row([date_now, customer_phone, order_items, "Pending"])
+        return True
+    except Exception as e:
+        print(f"Sheet failed: {e}")
+        return False
+
 # --- ROUTE 1: MISSED CALLS ---
 @app.route("/incoming", methods=['POST'])
 def incoming_call():
     from twilio.twiml.voice_response import VoiceResponse, Dial
     resp = VoiceResponse()
     dial = Dial(action='/status', timeout=20) 
-    if MY_REAL_PHONE:
-        dial.number(MY_REAL_PHONE)
+    if MY_REAL_PHONE: dial.number(MY_REAL_PHONE)
     resp.append(dial)
     return str(resp)
 
@@ -113,46 +125,61 @@ def whatsapp_reply():
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     print(f"User: {incoming_msg}")
-# שיפרנו את ההוראות כדי שהבוט לא יתבלבל
+
+    # --- STEP 1: DETECT INTENT ---
     tool_prompt = f"""
     Current Time: {current_time}
     User Message: "{incoming_msg}"
     
-    Analyze the user's message.
-    1. If they want to schedule/book/reserve, extract ISO time.
-    2. If they are just chatting (hello, question, etc.), return action="chat".
+    Analyze intent:
+    1. BOOKING (Meeting/Visit): Extract ISO time. Return action="book".
+    2. ORDER (Buying meat/food): Extract the items list. Return action="order".
+    3. CHAT (Questions): Return action="chat".
     
-    Output format: JSON ONLY. Do not write normal text.
-    
-    Example 1 (Booking): {{"action": "book", "iso_time": "2025-12-05T14:00:00"}}
-    Example 2 (Chatting): {{"action": "chat"}}
+    Output JSON ONLY:
+    Ex 1: {{"action": "book", "iso_time": "2025-12-05T14:00:00"}}
+    Ex 2: {{"action": "order", "items": "2kg Entrecote and 10 Kebabs"}}
+    Ex 3: {{"action": "chat"}}
     """
     
     try:
-        tool_response = model.generate_content(tool_prompt).text
-        tool_response = tool_response.replace('```json', '').replace('```', '').strip()
-        data = json.loads(tool_response)
+        raw = model.generate_content(tool_prompt).text
+        clean_json = raw.replace('```json', '').replace('```', '').strip()
+        
+        try:
+            data = json.loads(clean_json)
+            action = data.get("action", "chat")
+        except:
+            action = "chat"
         
         ai_reply = ""
-        if data.get("action") == "book":
+        
+        # --- ACTION: BOOKING ---
+        if action == "book":
             iso_time = data.get("iso_time")
-            topic = f"Meeting with {sender}"
-            success = book_meeting(topic, iso_time)
-            if success:
-                ai_reply = f"מעולה, קבעתי לך פגישה לתאריך {iso_time}. נתראה!"
+            if book_meeting(f"Meeting: {sender}", iso_time):
+                ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}. נתראה!"
             else:
-                ai_reply = "הייתה לי בעיה לקבוע את הפגישה. נסה שוב או תתקשר."
+                ai_reply = "הייתה תקלה ביומן."
+
+        # --- ACTION: ORDER ---
+        elif action == "order":
+            items = data.get("items")
+            if write_order(sender, items):
+                ai_reply = f"קיבלתי את ההזמנה שלך: {items}. נעביר אותה להכנה!"
+            else:
+                ai_reply = "הייתה תקלה ברישום ההזמנה."
+
+        # --- ACTION: CHAT ---
         else:
             chat_prompt = f"""
             You are Alice (אליס), secretary at 'Boaron Butchery'.
-            INSTRUCTIONS:
-            1. Reply in HEBREW ONLY. 
-            2. Use Hebrew script. 
-            3. Keep it short.
+            Reply in Hebrew. Calm, human tone. Short answers.
             User said: {incoming_msg}
             """
             response = model.generate_content(chat_prompt)
             ai_reply = response.text
+
     except Exception as e:
         print(f"Error: {e}")
         ai_reply = "אני בודקת..."
@@ -163,11 +190,8 @@ def whatsapp_reply():
 
 def send_whatsapp(to_number, body_text):
     try:
-        if not to_number.startswith('whatsapp:'):
-            to_number = f"whatsapp:{to_number}"
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, body=body_text, to=to_number)
-    except Exception as e:
-        print(e)
+    except: pass
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
