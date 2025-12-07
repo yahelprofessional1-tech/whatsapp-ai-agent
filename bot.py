@@ -9,7 +9,7 @@ import google.generativeai as genai
 # --- GOOGLE IMPORTS ---
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import gspread # <--- NEW for Sheets
+import gspread
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -31,14 +31,20 @@ MY_REAL_PHONE = os.getenv('MY_REAL_PHONE')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SERVICE_ACCOUNT_FILE = 'credentials.json'
-SHEET_NAME = "Butcher Shop Orders" # <--- Must match your Sheet Name exactly
+
+# --- SHEET NAME ---
+SHEET_NAME = "Butcher Shop Orders"
+
+# --- STRICT MENU (The Allowed List) ---
+MENU_ITEMS = "בשר בקר, עוף, הודו, אווז"
 
 # --- SETUP CLIENTS ---
-# 1. AI
+# 1. AI (USING THE VERSION THAT WORKS FOR YOU)
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest') # Safe model
+        # Using 'gemini-flash-latest' because 1.5/2.0 caused issues for your region
+        model = genai.GenerativeModel('gemini-flash-latest') 
 except Exception as e:
     print(f"AI Warning: {e}")
 
@@ -49,7 +55,7 @@ try:
 except Exception as e:
     print(f"Twilio Warning: {e}")
 
-# 3. Google Services (Calendar + Sheets)
+# 3. Google Services
 calendar_service = None
 sheet_service = None
 
@@ -69,7 +75,7 @@ try:
 except Exception as e:
     print(f"❌ Google Error: {e}")
 
-# --- HELPER 1: BOOK MEETING ---
+# --- HELPERS ---
 def book_meeting(event_summary, event_time_iso):
     if not calendar_service: return False
     try:
@@ -86,11 +92,9 @@ def book_meeting(event_summary, event_time_iso):
         print(f"Booking failed: {e}")
         return False
 
-# --- HELPER 2: WRITE ORDER TO SHEET ---
 def write_order(customer_phone, order_items):
     if not sheet_service: return False
     try:
-        # Row: Date | Phone | Items | Status
         date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         sheet_service.append_row([date_now, customer_phone, order_items, "Pending"])
         return True
@@ -126,20 +130,27 @@ def whatsapp_reply():
     
     print(f"User: {incoming_msg}")
 
-    # --- STEP 1: DETECT INTENT ---
+    # --- INTELLIGENT FILTER ---
     tool_prompt = f"""
     Current Time: {current_time}
     User Message: "{incoming_msg}"
     
-    Analyze intent:
-    1. BOOKING (Meeting/Visit): Extract ISO time. Return action="book".
-    2. ORDER (Buying meat/food): Extract the items list. Return action="order".
-    3. CHAT (Questions): Return action="chat".
+    You are the Logic Gate for 'Boaron Butchery'.
+    VALID MENU ITEMS (HEBREW): {MENU_ITEMS}
+    
+    INSTRUCTIONS:
+    1. FILTER: Is the user trying to order something? 
+       - If YES: Check if the items clearly belong to the VALID MENU ITEMS.
+       - IF VALID -> Return action="order", items="...".
+       - IF INVALID (Pizza, Elephant, etc.) -> Return action="chat" (Do NOT order).
+    
+    2. BOOKING: If they want to schedule a meeting/visit -> action="book".
+    3. CHAT: If they are asking questions, greeting, or ordering INVALID items -> action="chat".
+    4. BLOCK: If they are cursing/offensive -> action="block".
     
     Output JSON ONLY:
-    Ex 1: {{"action": "book", "iso_time": "2025-12-05T14:00:00"}}
-    Ex 2: {{"action": "order", "items": "2kg Entrecote and 10 Kebabs"}}
-    Ex 3: {{"action": "chat"}}
+    Ex 1: {{"action": "order", "items": "2kg Entrecote"}}
+    Ex 2 (Invalid Item): {{"action": "chat"}} 
     """
     
     try:
@@ -154,27 +165,36 @@ def whatsapp_reply():
         
         ai_reply = ""
         
-        # --- ACTION: BOOKING ---
-        if action == "book":
+        # --- LOGIC HANDLER ---
+        if action == "block":
+            ai_reply = "נא לשמור על שפה מכבדת."
+            
+        elif action == "book":
             iso_time = data.get("iso_time")
             if book_meeting(f"Meeting: {sender}", iso_time):
                 ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}. נתראה!"
             else:
                 ai_reply = "הייתה תקלה ביומן."
 
-        # --- ACTION: ORDER ---
         elif action == "order":
             items = data.get("items")
             if write_order(sender, items):
-                ai_reply = f"קיבלתי את ההזמנה שלך: {items}. נעביר אותה להכנה!"
+                ai_reply = f"הזמנה התקבלה: {items}. נעביר להכנה!"
             else:
                 ai_reply = "הייתה תקלה ברישום ההזמנה."
 
-        # --- ACTION: CHAT ---
-        else:
+        else: # Normal Chat
             chat_prompt = f"""
             You are Alice (אליס), secretary at 'Boaron Butchery'.
-            Reply in Hebrew. Calm, human tone. Short answers.
+            
+            CONTEXT: The user might have just asked for something we DON'T sell.
+            We ONLY sell: {MENU_ITEMS}.
+            
+            INSTRUCTIONS:
+            1. Reply in HEBREW ONLY.
+            2. If they asked for a weird item, politely explain we don't have it.
+            3. Keep it short.
+            
             User said: {incoming_msg}
             """
             response = model.generate_content(chat_prompt)
