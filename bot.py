@@ -31,19 +31,16 @@ MY_REAL_PHONE = os.getenv('MY_REAL_PHONE')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SERVICE_ACCOUNT_FILE = 'credentials.json'
-
-# --- SHEET NAME ---
 SHEET_NAME = "Butcher Shop Orders"
 
-# --- STRICT MENU (The Allowed List) ---
+# --- STRICT MENU ---
 MENU_ITEMS = "בשר בקר, עוף, הודו, אווז"
 
 # --- SETUP CLIENTS ---
-# 1. AI (USING THE VERSION THAT WORKS FOR YOU)
+# 1. AI (Using the version that worked for your key)
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
-        # Using 'gemini-flash-latest' because 1.5/2.0 caused issues for your region
         model = genai.GenerativeModel('gemini-flash-latest') 
 except Exception as e:
     print(f"AI Warning: {e}")
@@ -165,7 +162,6 @@ def whatsapp_reply():
         
         ai_reply = ""
         
-        # --- LOGIC HANDLER ---
         if action == "block":
             ai_reply = "נא לשמור על שפה מכבדת."
             
@@ -187,13 +183,11 @@ def whatsapp_reply():
             chat_prompt = f"""
             You are Alice (אליס), secretary at 'Boaron Butchery'.
             
-            CONTEXT: The user might have just asked for something we DON'T sell.
-            We ONLY sell: {MENU_ITEMS}.
-            
             INSTRUCTIONS:
             1. Reply in HEBREW ONLY.
-            2. If they asked for a weird item, politely explain we don't have it.
-            3. Keep it short.
+            2. Be direct and polite.
+            3. Do NOT list the full menu unless they specifically ask "What do you have?".
+            4. If they just say "Hi" or "Hello", simply ask: "מה תרצה להזמין?" (What would you like to order?).
             
             User said: {incoming_msg}
             """
