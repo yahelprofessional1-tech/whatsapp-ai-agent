@@ -1,5 +1,6 @@
 import os
 import json
+import re  # <--- NEW: The "Laser Cutter" tool
 import datetime
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
@@ -19,16 +20,16 @@ BUSINESS_NAME = "Israeli Law Firm"
 SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
 MENU_ITEMS = "דיני עבודה, דיני משפחה, תעבורה, מקרקעין, פלילי, הוצאה לפועל" 
 
-# 1. LAWYER PHONE (Where the reports go)
+# 1. LAWYER PHONE
 LAWYER_PHONE = os.getenv('LAWYER_PHONE') 
 
-# 2. VIP LIST (People the bot ignores - Add your wife/family here)
+# 2. VIP LIST 
 VIP_NUMBERS = [
     LAWYER_PHONE,
-    "whatsapp:+972500000000", # Example: Wife
+    "whatsapp:+972500000000", 
 ]
 
-# 3. SPAM PROTECTION (Cool Down Timer)
+# 3. SPAM PROTECTION
 last_auto_replies = {}
 COOL_DOWN_HOURS = 24 
 
@@ -122,17 +123,14 @@ def call_status():
     caller = request.values.get('From', '') 
     
     if status in ['no-answer', 'busy', 'failed', 'canceled']:
-        # VIP CHECK
         if caller in VIP_NUMBERS:
-            return str(VoiceResponse()) # Do nothing for VIPs
+            return str(VoiceResponse())
 
-        # COOL DOWN CHECK
         now = datetime.datetime.now()
         last_time = last_auto_replies.get(caller)
         if last_time and (now - last_time).total_seconds() < (COOL_DOWN_HOURS * 3600):
-            return str(VoiceResponse()) # Do nothing if we already texted them today
+            return str(VoiceResponse()) 
         
-        # SEND GREETING
         msg = "שלום, הגעתם למשרד עורכי דין. אנו כרגע בשיחה. איך אפשר לעזור?"
         try:
             client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, body=msg, to=caller)
@@ -169,7 +167,7 @@ def whatsapp_reply():
         del user_sessions[sender]
 
     else:
-        # LOGIC GATE (The Robust Brain)
+        # LOGIC GATE (UPGRADED)
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tool_prompt = f"""
         Current Time: {current_time}
@@ -180,7 +178,7 @@ def whatsapp_reply():
         1. FILTER: Is the user asking for legal service?
            - If YES: Check if it matches VALID SERVICES.
            - IF VALID -> Return action="service", item="[Service Name]".
-           - IF VAGUE/LONG STORY -> Return action="chat" (Do not guess!).
+           - IF VAGUE -> Return action="chat".
         
         2. BOOKING: If asking to schedule a meeting -> action="book".
         3. CHAT: General chat -> action="chat".
@@ -192,8 +190,17 @@ def whatsapp_reply():
         
         try:
             raw = model.generate_content(tool_prompt).text
-            clean_json = raw.replace('```json', '').replace('```', '').strip()
-            data = json.loads(clean_json)
+            
+            # --- THE FIX: ROBUST JSON PARSER ---
+            # Finds the first '{' and the last '}' to ignore extra text
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            
+            if match:
+                clean_json = match.group(0)
+                data = json.loads(clean_json)
+            else:
+                data = {"action": "chat"} # Fallback if no JSON found
+
             action = data.get("action", "chat")
             
             if action == "block":
@@ -212,18 +219,16 @@ def whatsapp_reply():
                 ai_reply = f"אשמח לעזור בנושא {data.get('item')}. \nכדי שנתקדם, מה שמך המלא?"
             
             else: 
-                # NORMAL CHAT (Polite Fallback)
                 chat_prompt = f"""
                 Role: Legal Secretary at {BUSINESS_NAME}.
                 Reply in Hebrew. Formal and polite.
-                If the user told a story but didn't say the category, ask: "באיזה תחום משפטי מדובר?".
                 If they just said "Hi", ask: "באיזה נושא אפשר לעזור?".
                 User said: {incoming_msg}
                 """
                 ai_reply = model.generate_content(chat_prompt).text
                 
         except Exception as e:
-            # SAFETY NET: If the bot crashes, say this instead of "Error":
+            # DEBUGGING: If it STILL fails, it will tell you WHY now.
             print(f"Logic Error: {e}")
             ai_reply = "לא הייתי בטוחה שהבנתי. באיזה תחום משפטי מדובר?"
 
