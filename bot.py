@@ -1,6 +1,4 @@
 import os
-import json
-import re  # <--- NEW: The "Laser Cutter" tool
 import datetime
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
@@ -167,7 +165,7 @@ def whatsapp_reply():
         del user_sessions[sender]
 
     else:
-        # LOGIC GATE (UPGRADED)
+        # LOGIC GATE (UNBREAKABLE TEXT VERSION)
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tool_prompt = f"""
         Current Time: {current_time}
@@ -175,62 +173,48 @@ def whatsapp_reply():
         VALID SERVICES: {MENU_ITEMS}
         
         INSTRUCTIONS:
-        1. FILTER: Is the user asking for legal service?
-           - If YES: Check if it matches VALID SERVICES.
-           - IF VALID -> Return action="service", item="[Service Name]".
-           - IF VAGUE -> Return action="chat".
+        1. Decide if the user needs a SERVICE, or if they are just CHATTING.
+        2. If they need a service (like Family Law, Labor Law, or a general legal consultation), output: SERVICE: [Name of Service]
+        3. If they are just saying "Hi" or telling a story without a clear request, output: CHAT: [Your polite Hebrew response]
+        4. If they are cursing, output: BLOCK
         
-        2. BOOKING: If asking to schedule a meeting -> action="book".
-        3. CHAT: General chat -> action="chat".
-        4. BLOCK: Offensive -> action="block".
+        EXAMPLES:
+        User: "אני צריך עזרה עם גירושין"
+        Output: SERVICE: דיני משפחה
         
-        Output JSON ONLY:
-        Ex: {{"action": "service", "item": "דיני משפחה"}}
+        User: "היי"
+        Output: CHAT: שלום, הגעתם למשרד עורכי דין. באיזה נושא משפטי אפשר לעזור?
+        
+        User: [Long story about being fired]
+        Output: SERVICE: דיני עבודה
         """
         
         try:
-            raw = model.generate_content(tool_prompt).text
+            # 1. GET RAW TEXT RESPONSE
+            raw_response = model.generate_content(tool_prompt).text.strip()
             
-            # --- THE FIX: ROBUST JSON PARSER ---
-            # Finds the first '{' and the last '}' to ignore extra text
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            
-            if match:
-                clean_json = match.group(0)
-                data = json.loads(clean_json)
-            else:
-                data = {"action": "chat"} # Fallback if no JSON found
-
-            action = data.get("action", "chat")
-            
-            if action == "block":
-                ai_reply = "נא לשמור על שפה מכבדת."
-
-            elif action == "book":
-                iso_time = data.get("iso_time")
-                if book_meeting(f"Meeting: {sender}", iso_time):
-                    ai_reply = f"נקבעה פגישה לתאריך {iso_time}."
-                else:
-                    ai_reply = "היומן כרגע מלא או לא זמין."
-
-            elif action == "service":
+            # 2. PARSE WITH SIMPLE TEXT LOGIC (No JSON crashes!)
+            if raw_response.startswith("SERVICE:"):
+                # Extract the service name
+                service_item = raw_response.replace("SERVICE:", "").strip()
                 session['state'] = 'ASK_NAME'
-                session['data']['service_type'] = data.get("item")
-                ai_reply = f"אשמח לעזור בנושא {data.get('item')}. \nכדי שנתקדם, מה שמך המלא?"
+                session['data']['service_type'] = service_item
+                ai_reply = f"אשמח לעזור בנושא {service_item}. \nכדי שנתקדם, מה שמך המלא?"
             
-            else: 
-                chat_prompt = f"""
-                Role: Legal Secretary at {BUSINESS_NAME}.
-                Reply in Hebrew. Formal and polite.
-                If they just said "Hi", ask: "באיזה נושא אפשר לעזור?".
-                User said: {incoming_msg}
-                """
-                ai_reply = model.generate_content(chat_prompt).text
-                
+            elif raw_response.startswith("CHAT:"):
+                # Just send the chat response directly
+                ai_reply = raw_response.replace("CHAT:", "").strip()
+            
+            elif raw_response.startswith("BLOCK"):
+                ai_reply = "נא לשמור על שפה מכבדת."
+            
+            else:
+                # Fallback if the AI forgets the format
+                ai_reply = "לא הייתי בטוחה שהבנתי. באיזה תחום משפטי מדובר?"
+
         except Exception as e:
-            # DEBUGGING: If it STILL fails, it will tell you WHY now.
             print(f"Logic Error: {e}")
-            ai_reply = "לא הייתי בטוחה שהבנתי. באיזה תחום משפטי מדובר?"
+            ai_reply = "תקלה זמנית במערכת. אנא נסו שוב."
 
     resp = MessagingResponse()
     resp.message(ai_reply)
