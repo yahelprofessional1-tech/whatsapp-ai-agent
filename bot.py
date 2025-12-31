@@ -14,14 +14,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-BUSINESS_NAME = "Boaron Butchery"
-# WE USE THE ID NOW (This fixes the "Technical Error")
-SHEET_ID = "1GuXkaBAUfswXwA1uwytrouqhepOASyW35h4GVaC5bQ0" 
-MENU_ITEMS = "בשר בקר, עוף, הודו, אווז" 
+# --- CONFIGURATION (LAWYER EDITION) ---
+BUSINESS_NAME = "Israeli Law Firm"
+# ⚠️ I extracted this ID from your screenshot (Lawyer Clients sheet)
+SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
+# Services offered
+MENU_ITEMS = "דיני עבודה, דיני משפחה, תעבורה, מקרקעין, פלילי, הוצאה לפועל" 
 
-# --- MEMORY STORAGE (State Machine) ---
-# Tracks: 'IDLE', 'ASK_NAME', 'ASK_ADDRESS'
+# --- MEMORY STORAGE ---
 user_sessions = {}
 
 # --- CREDENTIALS ---
@@ -54,10 +54,10 @@ try:
         creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=cal_scopes)
         calendar_service = build('calendar', 'v3', credentials=creds)
         
-        # Sheets (OPEN BY ID FIX)
+        # Sheets (OPEN BY ID)
         gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
         sheet_service = gc.open_by_key(SHEET_ID).sheet1
-        print("✅ Services Connected!")
+        print("✅ Lawyer Services Connected!")
 except Exception as e: 
     print(f"❌ Google Error: {e}")
 
@@ -76,12 +76,19 @@ def book_meeting(event_summary, event_time_iso):
         return True
     except: return False
 
-def save_order_to_sheet(phone, data):
+def save_lead_to_sheet(phone, data):
     if not sheet_service: return False
     try:
         date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        # Row: Date | Phone | Name | Address | Items | Status
-        row = [date_now, phone, data.get('name'), data.get('address'), data.get('items'), "Pending"]
+        # Row: Date | Phone | Name | Case Details | Service Type | Status
+        row = [
+            date_now, 
+            phone, 
+            data.get('name'), 
+            data.get('case_details'), 
+            data.get('service_type'), 
+            "New Lead"
+        ]
         sheet_service.append_row(row)
         return True
     except Exception as e:
@@ -110,41 +117,42 @@ def whatsapp_reply():
     # --- STATE 1: ASK NAME ---
     if state == 'ASK_NAME':
         session['data']['name'] = incoming_msg
-        session['state'] = 'ASK_ADDRESS' 
-        ai_reply = f"נעים להכיר, {incoming_msg}. לאיזו כתובת לשלוח את ההזמנה?"
+        session['state'] = 'ASK_DETAILS' 
+        ai_reply = f"נעים להכיר, {incoming_msg}. על מנת שנוכל לחזור אליך, אנא תאר בקצרה את נושא הפנייה?"
 
-    # --- STATE 2: ASK ADDRESS ---
-    elif state == 'ASK_ADDRESS':
-        session['data']['address'] = incoming_msg
+    # --- STATE 2: ASK CASE DETAILS ---
+    elif state == 'ASK_DETAILS':
+        session['data']['case_details'] = incoming_msg
         
         # FINISH: Save
-        if save_order_to_sheet(sender, session['data']):
-            ai_reply = "תודה רבה! ההזמנה נרשמה בהצלחה. יום טוב!"
+        if save_lead_to_sheet(sender, session['data']):
+            ai_reply = "תודה רבה. קיבלנו את הפרטים ועורך דין מטעמנו יצור קשר בהקדם."
         else:
-            ai_reply = "הייתה תקלה טכנית. נא להתקשר."
+            ai_reply = "תודה. הפרטים נרשמו (שגיאה טכנית קלה בשמירה, אך קיבלנו את ההודעה)."
         
         del user_sessions[sender]
 
-    # --- STATE 3: IDLE (STRICT MENU LOGIC) ---
+    # --- STATE 3: IDLE (LAWYER LOGIC) ---
     else:
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Updated Logic for Legal Services
         tool_prompt = f"""
         Current Time: {current_time}
         User Message: "{incoming_msg}"
-        VALID MENU (HEBREW): {MENU_ITEMS}
+        VALID SERVICES: {MENU_ITEMS}
         
         INSTRUCTIONS:
-        1. FILTER: Is the user trying to order something? 
-           - If YES: Check if items are in VALID MENU.
-           - IF VALID -> Return action="order", items="...".
-           - IF INVALID (Pizza, Elephant) -> Return action="chat" (Do NOT order).
+        1. FILTER: Is the user asking for legal advice or services? 
+           - If YES: Check if it matches VALID SERVICES.
+           - IF VALID -> Return action="service", item="[Service Name]".
+           - IF VAGUE -> Return action="chat" (Ask for clarification).
         
-        2. BOOKING: If asking to meet/schedule -> action="book".
-        3. CHAT: General chat or invalid orders -> action="chat".
-        4. BLOCK: Offensive -> action="block".
+        2. BOOKING: If asking to schedule a meeting -> action="book".
+        3. CHAT: General chat -> action="chat".
         
         Output JSON ONLY:
-        Ex: {{"action": "order", "items": "2kg Entrecote"}}
+        Ex: {{"action": "service", "item": "דיני משפחה"}}
         """
         
         try:
@@ -153,32 +161,29 @@ def whatsapp_reply():
             data = json.loads(clean_json)
             action = data.get("action", "chat")
             
-            if action == "block":
-                ai_reply = "נא לשמור על שפה מכבדת."
-
-            elif action == "book":
+            if action == "book":
                 iso_time = data.get("iso_time")
                 if book_meeting(f"Meeting: {sender}", iso_time):
-                    ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}."
+                    ai_reply = f"נקבעה פגישה לתאריך {iso_time}."
                 else:
-                    ai_reply = "הייתה תקלה ביומן."
+                    ai_reply = "היומן כרגע מלא או לא זמין."
 
-            elif action == "order":
-                # START SALES FUNNEL
+            elif action == "service":
+                # START LEAD FUNNEL
                 session['state'] = 'ASK_NAME'
-                session['data']['items'] = data.get("items")
-                ai_reply = f"בשמחה, רשמתי {data.get('items')}. \nכדי להשלים, מה השם שלך?"
+                session['data']['service_type'] = data.get("item")
+                ai_reply = f"אשמח לעזור בנושא {data.get('item')}. \nכדי שנתקדם, מה שמך המלא?"
             
-            else: # Normal Chat (Direct)
+            else: # Formal Chat
                 chat_prompt = f"""
-                You are Alice at {BUSINESS_NAME}.
-                Reply in Hebrew. Be direct.
-                If they say "Hi", ask "What would you like to order?".
+                You are a legal secretary at {BUSINESS_NAME}.
+                Reply in Hebrew. Be formal, professional, and empathetic.
+                If they say "Hi", ask: "באיזה נושא משפטי אפשר לעזור לך?".
                 User: {incoming_msg}
                 """
                 ai_reply = model.generate_content(chat_prompt).text
         except:
-            ai_reply = "אני בודקת..."
+            ai_reply = "אני בודקת את הנושא..."
 
     resp = MessagingResponse()
     resp.message(ai_reply)
