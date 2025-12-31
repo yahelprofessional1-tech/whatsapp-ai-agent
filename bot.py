@@ -52,6 +52,7 @@ SERVICE_ACCOUNT_FILE = 'credentials.json'
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
+        # REVERTED TO THE VERSION WE KNOW WORKS FOR YOU
         model = genai.GenerativeModel('gemini-flash-latest')
 except: print("AI Error")
 
@@ -165,7 +166,7 @@ def whatsapp_reply():
         del user_sessions[sender]
 
     else:
-        # LOGIC GATE (UNBREAKABLE TEXT VERSION)
+        # LOGIC GATE (TEXT ONLY - NO JSON CRASHES)
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tool_prompt = f"""
         Current Time: {current_time}
@@ -173,48 +174,48 @@ def whatsapp_reply():
         VALID SERVICES: {MENU_ITEMS}
         
         INSTRUCTIONS:
-        1. Decide if the user needs a SERVICE, or if they are just CHATTING.
-        2. If they need a service (like Family Law, Labor Law, or a general legal consultation), output: SERVICE: [Name of Service]
-        3. If they are just saying "Hi" or telling a story without a clear request, output: CHAT: [Your polite Hebrew response]
-        4. If they are cursing, output: BLOCK
+        1. Decide if the user needs a SERVICE (Legal help) or is CHATTING.
+        2. Output one of these formats ONLY:
+           - SERVICE: [Service Name]
+           - CHAT: [Hebrew Response]
+           - BLOCK
         
         EXAMPLES:
-        User: "אני צריך עזרה עם גירושין"
-        Output: SERVICE: דיני משפחה
-        
-        User: "היי"
-        Output: CHAT: שלום, הגעתם למשרד עורכי דין. באיזה נושא משפטי אפשר לעזור?
-        
-        User: [Long story about being fired]
-        Output: SERVICE: דיני עבודה
+        User: "I need divorce lawyer" -> Output: SERVICE: דיני משפחה
+        User: "Hi" -> Output: CHAT: שלום, הגעתם למשרד עו"ד. באיזה נושא אפשר לעזור?
+        User: [Long Story] -> Output: CHAT: שלום, אשמח לדעת באיזה תחום משפטי מדובר? (דיני עבודה, משפחה..?)
         """
         
         try:
-            # 1. GET RAW TEXT RESPONSE
-            raw_response = model.generate_content(tool_prompt).text.strip()
+            # 1. GENERATE
+            response = model.generate_content(tool_prompt)
             
-            # 2. PARSE WITH SIMPLE TEXT LOGIC (No JSON crashes!)
+            # 2. CHECK IF EMPTY (Safety Filter)
+            if not response.candidates:
+                raw_response = "CHAT: שלום, באיזה נושא אפשר לעזור?"
+            else:
+                raw_response = response.text.strip()
+
+            # 3. PARSE (Simple Text)
             if raw_response.startswith("SERVICE:"):
-                # Extract the service name
                 service_item = raw_response.replace("SERVICE:", "").strip()
                 session['state'] = 'ASK_NAME'
                 session['data']['service_type'] = service_item
                 ai_reply = f"אשמח לעזור בנושא {service_item}. \nכדי שנתקדם, מה שמך המלא?"
             
             elif raw_response.startswith("CHAT:"):
-                # Just send the chat response directly
                 ai_reply = raw_response.replace("CHAT:", "").strip()
             
-            elif raw_response.startswith("BLOCK"):
+            elif "BLOCK" in raw_response:
                 ai_reply = "נא לשמור על שפה מכבדת."
             
             else:
-                # Fallback if the AI forgets the format
-                ai_reply = "לא הייתי בטוחה שהבנתי. באיזה תחום משפטי מדובר?"
+                ai_reply = raw_response
 
         except Exception as e:
+            # ERROR FALLBACK
             print(f"Logic Error: {e}")
-            ai_reply = "תקלה זמנית במערכת. אנא נסו שוב."
+            ai_reply = "שלום, הגעתם למשרד עורכי דין. באיזה נושא אפשר לעזור?"
 
     resp = MessagingResponse()
     resp.message(ai_reply)
