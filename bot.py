@@ -16,10 +16,13 @@ app = Flask(__name__)
 
 # --- CONFIGURATION (LAWYER EDITION) ---
 BUSINESS_NAME = "Israeli Law Firm"
-# ⚠️ I extracted this ID from your screenshot (Lawyer Clients sheet)
 SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
-# Services offered
 MENU_ITEMS = "דיני עבודה, דיני משפחה, תעבורה, מקרקעין, פלילי, הוצאה לפועל" 
+
+# --- NEW: LAWYER CONTACT ---
+# The bot will send the report HERE. 
+# Make sure to add LAWYER_PHONE to your .env file!
+LAWYER_PHONE = os.getenv('LAWYER_PHONE') 
 
 # --- MEMORY STORAGE ---
 user_sessions = {}
@@ -33,6 +36,8 @@ if not os.path.exists('credentials.json'):
 
 TWILIO_WHATSAPP_NUMBER = 'whatsapp:+14155238886'
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+TWILIO_SID = os.getenv('TWILIO_SID')
+TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
 CALENDAR_ID = os.getenv('CALENDAR_ID')
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 
@@ -43,7 +48,13 @@ try:
         model = genai.GenerativeModel('gemini-flash-latest')
 except: print("AI Error")
 
-# --- 2. SETUP GOOGLE SERVICES ---
+# --- 2. SETUP TWILIO ---
+try:
+    if TWILIO_SID and TWILIO_TOKEN:
+        client = Client(TWILIO_SID, TWILIO_TOKEN)
+except: print("Twilio Error")
+
+# --- 3. SETUP GOOGLE SERVICES ---
 calendar_service = None
 sheet_service = None
 
@@ -61,7 +72,7 @@ try:
 except Exception as e: 
     print(f"❌ Google Error: {e}")
 
-# --- HELPERS ---
+# --- HELPER: BOOK MEETING ---
 def book_meeting(event_summary, event_time_iso):
     if not calendar_service: return False
     try:
@@ -76,11 +87,41 @@ def book_meeting(event_summary, event_time_iso):
         return True
     except: return False
 
+# --- HELPER: SEND REPORT TO LAWYER ---
+def send_report_to_lawyer(data, client_phone):
+    if not client or not LAWYER_PHONE: return
+    
+    # Clean "Digital Document" Format
+    report = f"""
+⚖️ *NEW CLIENT CASE FILE* 📅 *Date:* {datetime.datetime.now().strftime("%d/%m/%Y")}
+
+👤 *Client Details*
+• *Name:* {data.get('name')}
+• *Phone:* {client_phone}
+
+📂 *Category:* {data.get('service_type')}
+
+📝 *Case Description*
+"{data.get('case_details')}"
+
+🔻 *Status:* Pending Review
+    """
+    
+    try:
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            body=report,
+            to=LAWYER_PHONE
+        )
+        print("✅ Report sent to Lawyer")
+    except Exception as e:
+        print(f"❌ Report Failed: {e}")
+
+# --- HELPER: SAVE TO SHEET ---
 def save_lead_to_sheet(phone, data):
     if not sheet_service: return False
     try:
         date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        # Row: Date | Phone | Name | Case Details | Service Type | Status
         row = [
             date_now, 
             phone, 
@@ -124,32 +165,33 @@ def whatsapp_reply():
     elif state == 'ASK_DETAILS':
         session['data']['case_details'] = incoming_msg
         
-        # FINISH: Save
-        if save_lead_to_sheet(sender, session['data']):
-            ai_reply = "תודה רבה. קיבלנו את הפרטים ועורך דין מטעמנו יצור קשר בהקדם."
-        else:
-            ai_reply = "תודה. הפרטים נרשמו (שגיאה טכנית קלה בשמירה, אך קיבלנו את ההודעה)."
+        # 1. Save to Sheet
+        save_lead_to_sheet(sender, session['data'])
         
+        # 2. Notify Lawyer (Send Report)
+        send_report_to_lawyer(session['data'], sender)
+        
+        ai_reply = "תודה רבה. קיבלנו את הפרטים ועורך דין מטעמנו יצור קשר בהקדם."
         del user_sessions[sender]
 
-    # --- STATE 3: IDLE (LAWYER LOGIC) ---
+    # --- STATE 3: IDLE (MAIN LOGIC) ---
     else:
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Updated Logic for Legal Services
         tool_prompt = f"""
         Current Time: {current_time}
         User Message: "{incoming_msg}"
         VALID SERVICES: {MENU_ITEMS}
         
         INSTRUCTIONS:
-        1. FILTER: Is the user asking for legal advice or services? 
+        1. FILTER: Is the user asking for legal advice? 
            - If YES: Check if it matches VALID SERVICES.
            - IF VALID -> Return action="service", item="[Service Name]".
            - IF VAGUE -> Return action="chat" (Ask for clarification).
         
         2. BOOKING: If asking to schedule a meeting -> action="book".
         3. CHAT: General chat -> action="chat".
+        4. BLOCK: Offensive/Curses -> action="block".
         
         Output JSON ONLY:
         Ex: {{"action": "service", "item": "דיני משפחה"}}
@@ -161,7 +203,11 @@ def whatsapp_reply():
             data = json.loads(clean_json)
             action = data.get("action", "chat")
             
-            if action == "book":
+            # --- ACTION HANDLERS ---
+            if action == "block":
+                ai_reply = "נא לשמור על שפה מכבדת."
+
+            elif action == "book":
                 iso_time = data.get("iso_time")
                 if book_meeting(f"Meeting: {sender}", iso_time):
                     ai_reply = f"נקבעה פגישה לתאריך {iso_time}."
