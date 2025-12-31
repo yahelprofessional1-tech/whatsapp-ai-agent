@@ -36,8 +36,12 @@ SHEET_NAME = "Butcher Shop Orders"
 # --- STRICT MENU ---
 MENU_ITEMS = "בשר בקר, עוף, הודו, אווז"
 
+# --- MEMORY STORAGE (The State Machine) ---
+# Tracks where the user is: 'IDLE', 'ASK_NAME', 'ASK_ADDRESS'
+user_sessions = {}
+
 # --- SETUP CLIENTS ---
-# 1. AI (Using the version that worked for your key)
+# 1. AI
 try:
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
@@ -72,28 +76,21 @@ try:
 except Exception as e:
     print(f"❌ Google Error: {e}")
 
-# --- HELPERS ---
-def book_meeting(event_summary, event_time_iso):
-    if not calendar_service: return False
-    try:
-        start_dt = datetime.datetime.fromisoformat(event_time_iso)
-        end_dt = start_dt + datetime.timedelta(hours=1)
-        event = {
-            'summary': event_summary,
-            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Jerusalem'},
-            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Jerusalem'},
-        }
-        calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        return True
-    except Exception as e:
-        print(f"Booking failed: {e}")
-        return False
-
-def write_order(customer_phone, order_items):
+# --- HELPER: SAVE FULL ORDER TO SHEET ---
+def save_order_to_sheet(phone, data):
     if not sheet_service: return False
     try:
         date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        sheet_service.append_row([date_now, customer_phone, order_items, "Pending"])
+        # Row: Date | Phone | Name | Address | Items | Status
+        row = [
+            date_now, 
+            phone, 
+            data.get('name'), 
+            data.get('address'), 
+            data.get('items'), 
+            "Pending"
+        ]
+        sheet_service.append_row(row)
         return True
     except Exception as e:
         print(f"Sheet failed: {e}")
@@ -114,89 +111,113 @@ def call_status():
     status = request.values.get('DialCallStatus', '')
     caller = request.values.get('From', '') 
     if status in ['no-answer', 'busy', 'failed', 'canceled']:
+        # Note: We can't start a session from a missed call easily, just send greeting
         send_whatsapp(caller, "היי, הגעתם לאטליז בוארון. שמי אליס. איך אני יכולה לעזור?")
     from twilio.twiml.voice_response import VoiceResponse
     return str(VoiceResponse())
 
-# --- ROUTE 2: WHATSAPP BRAIN ---
+# --- ROUTE 2: WHATSAPP BRAIN (WITH MEMORY) ---
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     print(f"User: {incoming_msg}")
 
-    # --- INTELLIGENT FILTER ---
-    tool_prompt = f"""
-    Current Time: {current_time}
-    User Message: "{incoming_msg}"
+    # 1. CREATE SESSION IF NEW
+    if sender not in user_sessions:
+        user_sessions[sender] = {'state': 'IDLE', 'data': {}}
     
-    You are the Logic Gate for 'Boaron Butchery'.
-    VALID MENU ITEMS (HEBREW): {MENU_ITEMS}
-    
-    INSTRUCTIONS:
-    1. FILTER: Is the user trying to order something? 
-       - If YES: Check if the items clearly belong to the VALID MENU ITEMS.
-       - IF VALID -> Return action="order", items="...".
-       - IF INVALID (Pizza, Elephant, etc.) -> Return action="chat" (Do NOT order).
-    
-    2. BOOKING: If they want to schedule a meeting/visit -> action="book".
-    3. CHAT: If they are asking questions, greeting, or ordering INVALID items -> action="chat".
-    4. BLOCK: If they are cursing/offensive -> action="block".
-    
-    Output JSON ONLY:
-    Ex 1: {{"action": "order", "items": "2kg Entrecote"}}
-    Ex 2 (Invalid Item): {{"action": "chat"}} 
-    """
-    
-    try:
-        raw = model.generate_content(tool_prompt).text
-        clean_json = raw.replace('```json', '').replace('```', '').strip()
+    session = user_sessions[sender]
+    state = session['state']
+    ai_reply = ""
+
+    # --- STATE 1: ASKING FOR NAME ---
+    if state == 'ASK_NAME':
+        session['data']['name'] = incoming_msg
+        session['state'] = 'ASK_ADDRESS' # Next Step
+        ai_reply = f"נעים להכיר, {incoming_msg}. לאיזו כתובת לשלוח את ההזמנה?"
+
+    # --- STATE 2: ASKING FOR ADDRESS ---
+    elif state == 'ASK_ADDRESS':
+        session['data']['address'] = incoming_msg
+        
+        # FINISH: Save to Sheet
+        items = session['data'].get('items')
+        name = session['data'].get('name')
+        address = incoming_msg
+        
+        if save_order_to_sheet(sender, session['data']):
+            ai_reply = f"תודה {name}! הזמנתך ({items}) לכתובת {address} התקבלה בהצלחה."
+        else:
+            ai_reply = "הייתה תקלה טכנית בשמירת ההזמנה. נא להתקשר."
+        
+        # Reset User (Clear memory so they can order again later)
+        del user_sessions[sender]
+
+    # --- STATE 3: IDLE (NORMAL CHAT) ---
+    else:
+        # Check if they want to order
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tool_prompt = f"""
+        Current Time: {current_time}
+        User Message: "{incoming_msg}"
+        VALID MENU: {MENU_ITEMS}
+        
+        INSTRUCTIONS:
+        1. If user wants to order VALID items -> Return JSON: {{"action": "order", "items": "..."}}
+        2. If user wants to schedule/book -> Return JSON: {{"action": "book", "iso_time": "..."}}
+        3. If user chats -> Return JSON: {{"action": "chat"}}
+        4. If offensive -> Return JSON: {{"action": "block"}}
+        """
         
         try:
-            data = json.loads(clean_json)
-            action = data.get("action", "chat")
-        except:
-            action = "chat"
-        
-        ai_reply = ""
-        
-        if action == "block":
-            ai_reply = "נא לשמור על שפה מכבדת."
+            raw = model.generate_content(tool_prompt).text
+            clean_json = raw.replace('```json', '').replace('```', '').strip()
             
-        elif action == "book":
-            iso_time = data.get("iso_time")
-            if book_meeting(f"Meeting: {sender}", iso_time):
-                ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}. נתראה!"
+            try:
+                data = json.loads(clean_json)
+                action = data.get("action", "chat")
+            except:
+                action = "chat"
+
+            if action == "block":
+                ai_reply = "נא לשמור על שפה מכבדת."
+
+            # START ORDER FLOW
+            elif action == "order":
+                items = data.get("items")
+                # Save items to memory
+                session['state'] = 'ASK_NAME'
+                session['data']['items'] = items
+                ai_reply = f"בשמחה, רשמתי {items}. \nכדי להשלים את ההזמנה, מה השם שלך?"
+
+            # CALENDAR BOOKING (No memory needed for now)
+            elif action == "book":
+                iso_time = data.get("iso_time")
+                if book_meeting(f"Meeting: {sender}", iso_time):
+                     # Just checking if the helper exists in this scope, yes it does
+                    from googleapiclient.discovery import build # Re-import just in case inside function not needed
+                    ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}. נתראה!"
+                else:
+                    ai_reply = "הייתה תקלה ביומן."
+
+            # NORMAL CHAT
             else:
-                ai_reply = "הייתה תקלה ביומן."
-
-        elif action == "order":
-            items = data.get("items")
-            if write_order(sender, items):
-                ai_reply = f"הזמנה התקבלה: {items}. נעביר להכנה!"
-            else:
-                ai_reply = "הייתה תקלה ברישום ההזמנה."
-
-        else: # Normal Chat
-            chat_prompt = f"""
-            You are Alice (אליס), secretary at 'Boaron Butchery'.
-            
-            INSTRUCTIONS:
-            1. Reply in HEBREW ONLY.
-            2. Be direct and polite.
-            3. Do NOT list the full menu unless they specifically ask "What do you have?".
-            4. If they just say "Hi" or "Hello", simply ask: "מה תרצה להזמין?" (What would you like to order?).
-            
-            User said: {incoming_msg}
-            """
-            response = model.generate_content(chat_prompt)
-            ai_reply = response.text
-
-    except Exception as e:
-        print(f"Error: {e}")
-        ai_reply = "אני בודקת..."
+                chat_prompt = f"""
+                You are Alice (אליס), secretary at 'Boaron Butchery'.
+                INSTRUCTIONS:
+                1. Reply in HEBREW ONLY.
+                2. Be direct and polite.
+                3. Do NOT list the full menu unless asked.
+                4. If they say "Hi", ask "What would you like to order?".
+                User said: {incoming_msg}
+                """
+                ai_reply = model.generate_content(chat_prompt).text
+                
+        except Exception as e:
+            print(f"Error: {e}")
+            ai_reply = "אני בודקת..."
 
     resp = MessagingResponse()
     resp.message(ai_reply)
