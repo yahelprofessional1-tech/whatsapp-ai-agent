@@ -20,11 +20,17 @@ app = Flask(__name__)
 class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     
-    # ✅ THE FIX: The menu is HERE inside the code. 
-    # NO "FLOW_FILE" line anymore!
+    # ✅ UPDATED MENU: Added numbers to the text so users ALWAYS see options
     FLOW_STATES = {
         "START": {
-            "message": "שלום, הגעתם למשרד עורכי דין. באיזה נושא אפשר לעזור?",
+            "message": """שלום, הגעתם למשרד עורכי דין.
+באיזה נושא אפשר לעזור? (אנא השב עם מספר):
+
+1️⃣ גירושין
+2️⃣ משמורת ילדים
+3️⃣ הסכמי ממון
+4️⃣ צוואות וירושות
+5️⃣ תיאום פגישה במשרד""",
             "options": [
                 { "label": "גירושין", "next": "ASK_NAME" },
                 { "label": "משמורת ילדים", "next": "ASK_NAME" },
@@ -138,12 +144,14 @@ class TwilioManager:
     def send_interactive_message(self, to, body_text, options):
         if not self.client: return
         try:
+            # Always send text first (Backup)
+            # self.send_whatsapp(to, body_text) # Optional: Send text separately if list fails often
+            
             if options and len(options) > 3:
-                # LIST MENU
                 rows = [{"id": opt["label"], "title": opt["label"][:24], "description": ""} for opt in options]
                 list_payload = {
                     "type": "list",
-                    "header": {"type": "text", "text": "תפריט שירותים"},
+                    "header": {"type": "text", "text": "תפריט"},
                     "body": {"text": body_text},
                     "footer": {"text": "בחר אפשרות 👇"},
                     "action": {
@@ -156,7 +164,6 @@ class TwilioManager:
                     persistent_action=[json.dumps(list_payload)]
                 )
             elif options and len(options) > 0:
-                # BUTTONS
                 buttons = [{"type": "reply", "reply": {"id": opt["label"], "title": opt["label"]}} for opt in options]
                 button_payload = {
                     "type": "button",
@@ -183,7 +190,6 @@ def incoming(): return str(MessagingResponse())
 
 @app.route("/status", methods=['POST'])
 def status(): 
-    # Handle Missed Calls
     from twilio.twiml.voice_response import VoiceResponse
     status = request.values.get('DialCallStatus', '')
     caller = request.values.get('From', '')
@@ -193,8 +199,6 @@ def status():
         last = last_auto_replies.get(caller)
         if last and (now - last).total_seconds() < (Config.COOL_DOWN_HOURS * 3600):
             return str(VoiceResponse())
-
-        # Start Flow for missed call
         state = Config.FLOW_STATES['START']
         twilio_mgr.send_interactive_message(caller, "הגעתם למשרד, אנו בשיחה.\n" + state['message'], state.get('options', []))
         last_auto_replies[caller] = now
@@ -206,7 +210,6 @@ def whatsapp():
         incoming_msg = request.values.get('Body', '').strip()
         sender = request.values.get('From', '')
         
-        # 1. Start Session
         if sender not in user_sessions:
             user_sessions[sender] = {'current_state': 'START', 'data': {}}
             state = Config.FLOW_STATES['START']
@@ -215,23 +218,29 @@ def whatsapp():
 
         session = user_sessions[sender]
         current_state_name = session['current_state']
-        
-        # ✅ FIX: Get state from the DICTIONARY, not a function
         state_data = Config.FLOW_STATES.get(current_state_name)
 
         if not state_data:
             session['current_state'] = 'START'
             state_data = Config.FLOW_STATES['START']
 
-        # 2. Logic
         next_state_name = None
         options = state_data.get('options', [])
         
-        for opt in options:
-            if incoming_msg == opt['label'] or incoming_msg == opt.get('id'):
-                next_state_name = opt['next']
-                session['data']['topic'] = opt['label']
-                break
+        # ✅ NEW LOGIC: Support Numbers (1, 2, 3) AND Text
+        if incoming_msg.isdigit():
+            idx = int(incoming_msg) - 1
+            if 0 <= idx < len(options):
+                next_state_name = options[idx]['next']
+                session['data']['topic'] = options[idx]['label']
+
+        # Fallback: Check for Exact Match or Button Click
+        if not next_state_name:
+            for opt in options:
+                if incoming_msg == opt['label'] or incoming_msg == opt.get('id'):
+                    next_state_name = opt['next']
+                    session['data']['topic'] = opt['label']
+                    break
         
         if not next_state_name and state_data.get('allow_free_text'):
             next_state_name = state_data.get('next')
@@ -239,7 +248,6 @@ def whatsapp():
             elif current_state_name == 'ASK_DETAILS': session['data']['details'] = incoming_msg
             elif current_state_name == 'ASK_BOOKING': session['data']['details'] = incoming_msg
 
-        # 3. Transition
         if next_state_name:
             session['current_state'] = next_state_name
             next_state = Config.FLOW_STATES.get(next_state_name)
@@ -258,7 +266,7 @@ def whatsapp():
             twilio_mgr.send_interactive_message(sender, next_state['message'], next_state.get('options', []))
         
         else:
-            twilio_mgr.send_whatsapp(sender, "אנא בחר אחת מהאפשרויות בתפריט.")
+            twilio_mgr.send_whatsapp(sender, "אנא השב עם מספר האפשרות (למשל: 1).")
 
     except Exception as e:
         logger.error(f"CRITICAL ERROR: {e}")
