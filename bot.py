@@ -11,7 +11,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import gspread
 from dotenv import load_dotenv
-import importlib.metadata # <--- NEW: To check versions
 
 # --- 1. SYSTEM SETUP ---
 load_dotenv()
@@ -67,7 +66,6 @@ def create_credentials():
         if json_content:
             with open(Config.SERVICE_ACCOUNT_FILE, 'w') as f:
                 f.write(json_content)
-            logger.info("✅ Credentials file created.")
 
 create_credentials()
 
@@ -123,13 +121,11 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # We try 1.5-flash first. If it fails, we fall back to Pro automatically.
+        # We try to load 1.5-flash. If it fails, we will know when we run the "MODELS" command.
         try:
-            self.model = genai.GenerativeModel('gemini-1.5-flash-001', tools=self.tools, system_instruction=self.system_instruction)
-            self.version = "1.5-flash-001"
+            self.model = genai.GenerativeModel('gemini-1.5-flash', tools=self.tools, system_instruction=self.system_instruction)
         except:
             self.model = genai.GenerativeModel('gemini-pro', tools=self.tools)
-            self.version = "gemini-pro (Classic)"
             
         self.active_chats = {}
 
@@ -162,17 +158,24 @@ def status():
 def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
-    
-    # 🔍 VERSION CHECKER (Secret Command)
-    if incoming_msg.upper() == "VERSION":
+
+    # 🚨 THE MODELS CHECKER 🚨
+    if incoming_msg.upper() == "MODELS":
         try:
-            lib_ver = importlib.metadata.version('google-generativeai')
-            model_ver = agent.version
-            send_msg(sender, f"📊 **Debug Report:**\nLibrary: {lib_ver}\nModel: {model_ver}")
+            available = []
+            # Ask Google: "What models can I use?"
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available.append(m.name)
+            
+            # Send the list to your phone
+            report = "🤖 *Allowed Models for your Key:*\n" + "\n".join(available)
+            send_msg(sender, report)
         except Exception as e:
-            send_msg(sender, f"Error checking version: {e}")
+            send_msg(sender, f"Error checking models: {e}")
         return str(MessagingResponse())
     
+    # Normal Logic Below...
     if sender not in user_sessions: 
         user_sessions[sender] = 'START'
         state = Config.FLOW_STATES['START']
@@ -215,7 +218,7 @@ def whatsapp():
         send_msg(sender, reply)
     except Exception as e:
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ תקלה במוח: {str(e)}")
+        send_msg(sender, f"⚠️ Error: {str(e)}")
         
     return str(MessagingResponse())
 
