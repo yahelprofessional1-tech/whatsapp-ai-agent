@@ -66,6 +66,7 @@ def create_credentials():
         if json_content:
             with open(Config.SERVICE_ACCOUNT_FILE, 'w') as f:
                 f.write(json_content)
+            logger.info("✅ Credentials file created.")
 
 create_credentials()
 
@@ -73,6 +74,7 @@ create_credentials()
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def save_case_summary(name: str, topic: str, summary: str):
+    """Saves the case summary to Sheets + Notifies Lawyer."""
     try:
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
         gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -86,6 +88,7 @@ def save_case_summary(name: str, topic: str, summary: str):
     except Exception as e: return f"Error: {str(e)}"
 
 def book_meeting(client_name: str, reason: str):
+    """Books a meeting on Google Calendar."""
     try:
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
         creds = service_account.Credentials.from_service_account_file(Config.SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar'])
@@ -107,7 +110,7 @@ def book_meeting(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)}"
 
-# --- 4. AI AGENT ---
+# --- 4. AI AGENT (Gemini 2.0 Flash) ---
 class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
@@ -115,18 +118,15 @@ class GeminiAgent:
         
         self.system_instruction = f"""
         You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
-        1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary to speed things up.
+        1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary.
         2. **Gathering:** Listen to their story. Get their Name.
         3. **Action:** Use `save_case_summary` once you have the info.
         4. **Tone:** Professional Hebrew.
         """
         
-        # We try to load 1.5-flash. If it fails, we will know when we run the "MODELS" command.
-        try:
-            self.model = genai.GenerativeModel('gemini-1.5-flash', tools=self.tools, system_instruction=self.system_instruction)
-        except:
-            self.model = genai.GenerativeModel('gemini-pro', tools=self.tools)
-            
+        # ✅ UPGRADED TO GEMINI 2.0 FLASH
+        # This is strictly from your allowed list. No more guessing.
+        self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
@@ -158,24 +158,7 @@ def status():
 def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
-
-    # 🚨 THE MODELS CHECKER 🚨
-    if incoming_msg.upper() == "MODELS":
-        try:
-            available = []
-            # Ask Google: "What models can I use?"
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available.append(m.name)
-            
-            # Send the list to your phone
-            report = "🤖 *Allowed Models for your Key:*\n" + "\n".join(available)
-            send_msg(sender, report)
-        except Exception as e:
-            send_msg(sender, f"Error checking models: {e}")
-        return str(MessagingResponse())
     
-    # Normal Logic Below...
     if sender not in user_sessions: 
         user_sessions[sender] = 'START'
         state = Config.FLOW_STATES['START']
@@ -218,7 +201,7 @@ def whatsapp():
         send_msg(sender, reply)
     except Exception as e:
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ Error: {str(e)}")
+        send_msg(sender, f"⚠️ תקלה: {str(e)}")
         
     return str(MessagingResponse())
 
