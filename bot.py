@@ -59,16 +59,33 @@ class Config:
         "FINISH_BOOKING": { "message": "פגישה שוריינה למחר ב-10:00.", "action": "book_meeting" }
     }
 
-# --- 2. TOOLS ---
+# --- 2. KEY MAKER (CRITICAL RESTORED FEATURE) ---
+def create_credentials():
+    """Creates the credentials.json file from the Environment Variable on Render"""
+    if not os.path.exists(Config.SERVICE_ACCOUNT_FILE):
+        json_content = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        if json_content:
+            with open(Config.SERVICE_ACCOUNT_FILE, 'w') as f:
+                f.write(json_content)
+            logger.info("✅ Credentials file created from Environment Variable.")
+        else:
+            logger.warning("⚠️ Warning: GOOGLE_CREDENTIALS_JSON not found in env.")
+
+# Call this immediately when code loads
+create_credentials()
+
+# --- 3. TOOLS ---
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def save_case_summary(name: str, topic: str, summary: str):
     """Saves the client's case summary and notifies the lawyer."""
     try:
-        if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
-            gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
-            sheet = gc.open_by_key(Config.SHEET_ID).sheet1
-            sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
+        # Re-check credentials just in case
+        if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
+        
+        gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
+        sheet = gc.open_by_key(Config.SHEET_ID).sheet1
+        sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
         
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\nהבוט שמר את הפרטים."
@@ -80,7 +97,8 @@ def save_case_summary(name: str, topic: str, summary: str):
 def book_meeting(client_name: str, reason: str):
     """Books a meeting on the Google Calendar."""
     try:
-        if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): return "Error: No Credentials"
+        if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
+        
         creds = service_account.Credentials.from_service_account_file(Config.SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar'])
         calendar = build('calendar', 'v3', credentials=creds)
         
@@ -101,7 +119,7 @@ def book_meeting(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)}"
 
-# --- 3. AI AGENT ---
+# --- 4. AI AGENT ---
 class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
@@ -115,9 +133,8 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ BACK TO PRO (THE SMART ONE)
-        # If this crashes, the error reporter below will catch it.
-        self.model = genai.GenerativeModel('gemini-1.5-pro', tools=self.tools, system_instruction=self.system_instruction)
+        # Using Flash for Speed + Reliability
+        self.model = genai.GenerativeModel('gemini-1.5-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
@@ -125,7 +142,7 @@ class GeminiAgent:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
         return self.active_chats[user_id].send_message(user_msg).text
 
-# --- 4. LOGIC ENGINE ---
+# --- 5. LOGIC ENGINE ---
 agent = GeminiAgent()
 user_sessions = {}
 last_auto_replies = {} 
@@ -187,12 +204,10 @@ def whatsapp():
         user_sessions[sender] = 'START'
         return str(MessagingResponse())
 
-    # --- AI EXECUTION BLOCK ---
     try:
         reply = agent.chat(sender, incoming_msg)
         send_msg(sender, reply)
     except Exception as e:
-        # ✅ DEBUGGER: This will send the REAL crash reason to WhatsApp
         logger.error(f"AI Crash: {e}")
         send_msg(sender, f"⚠️ תקלה במוח: {str(e)}")
         
