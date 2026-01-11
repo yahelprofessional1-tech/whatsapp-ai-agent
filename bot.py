@@ -66,7 +66,6 @@ def create_credentials():
         if json_content:
             with open(Config.SERVICE_ACCOUNT_FILE, 'w') as f:
                 f.write(json_content)
-            logger.info("✅ Credentials file created.")
 
 create_credentials()
 
@@ -74,7 +73,6 @@ create_credentials()
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def save_case_summary(name: str, topic: str, summary: str):
-    """Saves the case summary to Sheets + Notifies Lawyer."""
     try:
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
         gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -88,7 +86,6 @@ def save_case_summary(name: str, topic: str, summary: str):
     except Exception as e: return f"Error: {str(e)}"
 
 def book_meeting(client_name: str, reason: str):
-    """Books a meeting on Google Calendar."""
     try:
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
         creds = service_account.Credentials.from_service_account_file(Config.SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar'])
@@ -110,7 +107,7 @@ def book_meeting(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)}"
 
-# --- 4. AI AGENT (Gemini 2.0 Flash) ---
+# --- 4. AI AGENT ---
 class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
@@ -124,9 +121,10 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ UPGRADED TO GEMINI 2.0 FLASH
-        # This is strictly from your allowed list. No more guessing.
-        self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
+        # ✅ FIX: Using 'gemini-flash-latest'
+        # This is the "Evergreen" model listed in your API options. 
+        # It automatically points to the most stable Flash version (1.5 or 2.0).
+        self.model = genai.GenerativeModel('gemini-flash-latest', tools=self.tools, system_instruction=self.system_instruction)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
@@ -199,9 +197,9 @@ def whatsapp():
     try:
         reply = agent.chat(sender, incoming_msg)
         send_msg(sender, reply)
-    except Exception as e:
+    except Exception as e: # Catch ALL errors, even the weird ones
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ תקלה: {str(e)}")
+        send_msg(sender, f"⚠️ סליחה, קרתה תקלה: {str(e)}")
         
     return str(MessagingResponse())
 
