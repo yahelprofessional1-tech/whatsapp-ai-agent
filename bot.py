@@ -4,7 +4,7 @@ import datetime
 import logging
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from twilio.twiml.voice_response import VoiceResponse # <--- ADDED THIS FOR CALLS
+from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 import google.generativeai as genai
 from google.oauth2 import service_account
@@ -28,8 +28,8 @@ class Config:
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
     CALENDAR_ID = os.getenv('CALENDAR_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
-    VIP_NUMBERS = [LAWYER_PHONE] # Numbers the bot ignores (like you)
-    COOL_DOWN_HOURS = 24 # Don't spam the same caller twice in 24h
+    VIP_NUMBERS = [LAWYER_PHONE]
+    COOL_DOWN_HOURS = 24
     
     # 📋 MENU
     FLOW_STATES = {
@@ -106,6 +106,7 @@ class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
+        
         self.system_instruction = f"""
         You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
         1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary to speed things up.
@@ -113,6 +114,9 @@ class GeminiAgent:
         3. **Action:** Use `save_case_summary` once you have the info.
         4. **Tone:** Professional Hebrew.
         """
+        
+        # ✅ BACK TO PRO (THE SMART ONE)
+        # If this crashes, the error reporter below will catch it.
         self.model = genai.GenerativeModel('gemini-1.5-pro', tools=self.tools, system_instruction=self.system_instruction)
         self.active_chats = {}
 
@@ -124,29 +128,21 @@ class GeminiAgent:
 # --- 4. LOGIC ENGINE ---
 agent = GeminiAgent()
 user_sessions = {}
-last_auto_replies = {} # Memory for missed calls
+last_auto_replies = {} 
 
 @app.route("/status", methods=['POST'])
 def status(): 
-    """🚨 THIS WAS MISSING: Handles Missed Voice Calls"""
     status = request.values.get('DialCallStatus', '')
     caller = request.values.get('From', '')
-    
-    # If the call was missed/busy/no-answer
     if status in ['no-answer', 'busy', 'failed', 'canceled'] or request.values.get('CallStatus') == 'ringing':
         if caller in Config.VIP_NUMBERS: return str(VoiceResponse())
-        
-        # Check Cool Down (Don't spam)
         now = datetime.datetime.now()
         last = last_auto_replies.get(caller)
         if last and (now - last).total_seconds() < (Config.COOL_DOWN_HOURS * 3600):
             return str(VoiceResponse())
-
-        # Send the WhatsApp Menu!
         state = Config.FLOW_STATES['START']
         send_menu(caller, "הגעתם למשרד, אנו בשיחה.\n" + state['message'], state['options'])
         last_auto_replies[caller] = now
-        
     return str(VoiceResponse())
 
 @app.route("/whatsapp", methods=['POST'])
@@ -154,7 +150,6 @@ def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     
-    # 1. Init User
     if sender not in user_sessions: 
         user_sessions[sender] = 'START'
         state = Config.FLOW_STATES['START']
@@ -163,48 +158,46 @@ def whatsapp():
 
     current_state = user_sessions[sender]
 
-    # 2. Number Logic
     if incoming_msg.isdigit():
         idx = int(incoming_msg) - 1
         options = Config.FLOW_STATES['START']['options']
         if 0 <= idx < len(options):
             selected = options[idx]
-            
             if selected['next'] == 'AI_MODE_SUMMARY':
                 user_sessions[sender] = 'AI_MODE'
                 topic = selected['label']
-                reply = agent.chat(sender, f"The user selected {topic}. Offer them to write a summary.")
-                send_msg(sender, reply)
+                try:
+                    reply = agent.chat(sender, f"The user selected {topic}. Offer them to write a summary.")
+                    send_msg(sender, reply)
+                except Exception as e:
+                    send_msg(sender, f"AI Error: {str(e)}")
                 return str(MessagingResponse())
-            
             elif selected['next'] == 'ASK_BOOKING':
                 user_sessions[sender] = 'ASK_BOOKING'
                 send_msg(sender, Config.FLOW_STATES['ASK_BOOKING']['message'])
                 return str(MessagingResponse())
-
             elif selected['next'] == 'AI_MODE':
                 user_sessions[sender] = 'AI_MODE'
                 send_msg(sender, "שלום! אני כאן. איך אפשר לעזור?")
                 return str(MessagingResponse())
 
-    # 3. Booking Logic
     if current_state == 'ASK_BOOKING':
         book_meeting(sender, "Manual Booking")
         send_msg(sender, Config.FLOW_STATES['FINISH_BOOKING']['message'])
         user_sessions[sender] = 'START'
         return str(MessagingResponse())
 
-    # 4. AI Logic
+    # --- AI EXECUTION BLOCK ---
     try:
         reply = agent.chat(sender, incoming_msg)
         send_msg(sender, reply)
     except Exception as e:
-        logger.error(f"AI Error: {e}")
-        send_msg(sender, "סליחה, נסה שוב.")
+        # ✅ DEBUGGER: This will send the REAL crash reason to WhatsApp
+        logger.error(f"AI Crash: {e}")
+        send_msg(sender, f"⚠️ תקלה במוח: {str(e)}")
         
     return str(MessagingResponse())
 
-# --- HELPERS ---
 def send_menu(to, body, options):
     if not twilio_mgr: return
     try:
