@@ -11,6 +11,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import gspread
 from dotenv import load_dotenv
+import importlib.metadata # <--- NEW: To check versions
 
 # --- 1. SYSTEM SETUP ---
 load_dotenv()
@@ -59,30 +60,23 @@ class Config:
         "FINISH_BOOKING": { "message": "פגישה שוריינה למחר ב-10:00.", "action": "book_meeting" }
     }
 
-# --- 2. KEY MAKER (CRITICAL RESTORED FEATURE) ---
+# --- 2. KEY MAKER ---
 def create_credentials():
-    """Creates the credentials.json file from the Environment Variable on Render"""
     if not os.path.exists(Config.SERVICE_ACCOUNT_FILE):
         json_content = os.getenv('GOOGLE_CREDENTIALS_JSON')
         if json_content:
             with open(Config.SERVICE_ACCOUNT_FILE, 'w') as f:
                 f.write(json_content)
-            logger.info("✅ Credentials file created from Environment Variable.")
-        else:
-            logger.warning("⚠️ Warning: GOOGLE_CREDENTIALS_JSON not found in env.")
+            logger.info("✅ Credentials file created.")
 
-# Call this immediately when code loads
 create_credentials()
 
 # --- 3. TOOLS ---
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def save_case_summary(name: str, topic: str, summary: str):
-    """Saves the client's case summary and notifies the lawyer."""
     try:
-        # Re-check credentials just in case
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
-        
         gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
         sheet = gc.open_by_key(Config.SHEET_ID).sheet1
         sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
@@ -90,15 +84,12 @@ def save_case_summary(name: str, topic: str, summary: str):
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\nהבוט שמר את הפרטים."
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
-            
         return "Success: Summary saved and lawyer notified."
     except Exception as e: return f"Error: {str(e)}"
 
 def book_meeting(client_name: str, reason: str):
-    """Books a meeting on the Google Calendar."""
     try:
         if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
-        
         creds = service_account.Credentials.from_service_account_file(Config.SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar'])
         calendar = build('calendar', 'v3', credentials=creds)
         
@@ -115,7 +106,6 @@ def book_meeting(client_name: str, reason: str):
         
         if twilio_mgr and Config.LAWYER_PHONE:
              twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=f"📅 *פגישה חדשה!* {client_name}", to=Config.LAWYER_PHONE)
-
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)}"
 
@@ -133,8 +123,14 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # Using Flash for Speed + Reliability
-        self.model = genai.GenerativeModel('gemini-1.5-flash', tools=self.tools, system_instruction=self.system_instruction)
+        # We try 1.5-flash first. If it fails, we fall back to Pro automatically.
+        try:
+            self.model = genai.GenerativeModel('gemini-1.5-flash-001', tools=self.tools, system_instruction=self.system_instruction)
+            self.version = "1.5-flash-001"
+        except:
+            self.model = genai.GenerativeModel('gemini-pro', tools=self.tools)
+            self.version = "gemini-pro (Classic)"
+            
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
@@ -166,6 +162,16 @@ def status():
 def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
+    
+    # 🔍 VERSION CHECKER (Secret Command)
+    if incoming_msg.upper() == "VERSION":
+        try:
+            lib_ver = importlib.metadata.version('google-generativeai')
+            model_ver = agent.version
+            send_msg(sender, f"📊 **Debug Report:**\nLibrary: {lib_ver}\nModel: {model_ver}")
+        except Exception as e:
+            send_msg(sender, f"Error checking version: {e}")
+        return str(MessagingResponse())
     
     if sender not in user_sessions: 
         user_sessions[sender] = 'START'
