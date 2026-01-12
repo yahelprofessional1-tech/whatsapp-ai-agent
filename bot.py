@@ -25,10 +25,9 @@ class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
     
-    # 📧 EMAIL CONFIG (Auto-Fixer Added)
+    # 📧 EMAIL CONFIG
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
-    
-    # 🛠️ FIX: This line removes spaces from the password automatically
+    # Auto-clean password
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
     
@@ -87,8 +86,7 @@ create_credentials()
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def send_email_report(name, topic, summary):
-    """Sends a professional HTML email."""
-    # Safety Check
+    """Sends email with safety timeout."""
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
         return "Email Skipped (Config Missing)"
         
@@ -115,19 +113,20 @@ def send_email_report(name, topic, summary):
     msg.add_alternative(html_content, subtype='html')
 
     try:
-        # Timeout added to prevent freezing
         context = ssl.create_default_context()
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=10) as smtp:
+        # Timeout set to 5 seconds to prevent hanging
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=5) as smtp:
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
         return "Email Sent Successfully"
     except Exception as e:
         logger.error(f"Email Failed: {e}")
-        return f"Email Failed (Bot continued): {e}"
+        # 🛡️ Limit error to 1200 chars
+        return f"Email Failed: {str(e)[:1200]}"
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
-        # 1. Silent Backup to Sheets
+        # 1. Sheets Backup
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -135,16 +134,16 @@ def save_case_summary(name: str, topic: str, summary: str):
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
             except: pass 
 
-        # 2. Send Email
+        # 2. Email
         email_status = send_email_report(name, topic, summary)
         
-        # 3. Notify Lawyer via WhatsApp
+        # 3. WhatsApp Notification
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס מייל: {email_status})"
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
         return f"Success. Email Status: {email_status}"
-    except Exception as e: return f"Error: {str(e)}"
+    except Exception as e: return f"Error: {str(e)[:1200]}" # Limit to 1200 chars
 
 def book_meeting(client_name: str, reason: str):
     try:
@@ -166,7 +165,7 @@ def book_meeting(client_name: str, reason: str):
         if twilio_mgr and Config.LAWYER_PHONE:
              twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=f"📅 *פגישה חדשה!* {client_name}", to=Config.LAWYER_PHONE)
         return "Success: Meeting booked for tomorrow at 10:00 AM."
-    except Exception as e: return f"Error: {str(e)}"
+    except Exception as e: return f"Error: {str(e)[:1200]}" # Limit to 1200 chars
 
 # --- 4. AI AGENT ---
 class GeminiAgent:
@@ -174,7 +173,7 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # Instructions (Hidden)
+        # System Instructions
         self.system_instruction = f"""
         You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
         1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary.
@@ -183,14 +182,14 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ USING 'gemini-2.0-flash' (Your Working Model)
+        # ✅ Using Gemini 2.0 (Working Version)
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
         if user_id not in self.active_chats:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
-            # 💉 INJECTION METHOD (Your Working Trick)
+            # 💉 Injection Method
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
             
         return self.active_chats[user_id].send_message(user_msg).text
@@ -240,7 +239,7 @@ def whatsapp():
                     reply = agent.chat(sender, f"The user selected {topic}. Offer them to write a summary.")
                     send_msg(sender, reply)
                 except Exception as e:
-                    send_msg(sender, f"AI Error: {str(e)}")
+                    send_msg(sender, f"AI Error: {str(e)[:1200]}") # Limit to 1200
                 return str(MessagingResponse())
             elif selected['next'] == 'ASK_BOOKING':
                 user_sessions[sender] = 'ASK_BOOKING'
@@ -262,7 +261,8 @@ def whatsapp():
         send_msg(sender, reply)
     except Exception as e:
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ סליחה, קרתה תקלה: {str(e)}")
+        # 🛡️ THE SAFETY CUTTER: Cut error to 1200 chars
+        send_msg(sender, f"⚠️ תקלה: {str(e)[:1200]}")
         
     return str(MessagingResponse())
 
