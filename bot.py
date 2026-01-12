@@ -2,6 +2,9 @@ import os
 import json
 import datetime
 import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
@@ -21,11 +24,20 @@ app = Flask(__name__)
 class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
+    
+    # 📧 EMAIL CONFIG (NEW)
+    EMAIL_SENDER = os.getenv('EMAIL_SENDER')
+    EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+    LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
+    
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     TWILIO_SID = os.getenv('TWILIO_SID')
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
     TWILIO_NUMBER = 'whatsapp:+14155238886'
+    
+    # We keep this as a Silent Backup Database (Lawyer doesn't need to look at it)
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
+    
     CALENDAR_ID = os.getenv('CALENDAR_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
     VIP_NUMBERS = [LAWYER_PHONE]
@@ -69,20 +81,66 @@ def create_credentials():
 
 create_credentials()
 
-# --- 3. TOOLS ---
+# --- 3. TOOLS (EMAIL ENGINE ADDED) ---
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
+
+def send_email_report(name, topic, summary):
+    """Sends a professional HTML email to the lawyer."""
+    if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
+        return "Email Config Missing"
+        
+    msg = EmailMessage()
+    msg['Subject'] = f"⚖️ תקציר תיק חדש: {name} - {topic}"
+    msg['From'] = Config.EMAIL_SENDER
+    msg['To'] = Config.LAWYER_EMAIL
+    
+    # Professional HTML Format
+    html_content = f"""
+    <div dir="rtl" style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #2c3e50;">תקציר תיק חדש התקבל</h2>
+        <hr>
+        <p><strong>👤 שם הלקוח:</strong> {name}</p>
+        <p><strong>📂 נושא:</strong> {topic}</p>
+        <p><strong>📅 תאריך:</strong> {datetime.datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; border-right: 5px solid #2c3e50;">
+            <h3 style="margin-top: 0;">סיכום המקרה:</h3>
+            <p style="white-space: pre-wrap;">{summary}</p>
+        </div>
+        <hr>
+        <p style="font-size: 12px; color: #777;">נשלח אוטומטית ע"י העוזר החכם.</p>
+    </div>
+    """
+    msg.add_alternative(html_content, subtype='html')
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as smtp:
+            smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        return "Email Sent Successfully"
+    except Exception as e:
+        logger.error(f"Email Failed: {e}")
+        return f"Email Failed: {e}"
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
-        if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
-        gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
-        sheet = gc.open_by_key(Config.SHEET_ID).sheet1
-        sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
+        # 1. Save to Sheet (Silent Backup)
+        if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
+            try:
+                gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
+                sheet = gc.open_by_key(Config.SHEET_ID).sheet1
+                sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
+            except: pass # If sheet fails, we don't care, we rely on email now.
+
+        # 2. Send Email (The Main Event)
+        email_status = send_email_report(name, topic, summary)
         
+        # 3. Notify Lawyer via WhatsApp (Just a heads up)
         if twilio_mgr and Config.LAWYER_PHONE:
-            msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\nהבוט שמר את הפרטים."
+            msg_body = f"📧 *נשלח מייל חדש!* ({topic})\n\n👤 *לקוח:* {name}\nהתקציר המלא ממתין לך במייל."
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
-        return "Success: Summary saved and lawyer notified."
+            
+        return f"Success. Email: {email_status}"
     except Exception as e: return f"Error: {str(e)}"
 
 def book_meeting(client_name: str, reason: str):
@@ -121,15 +179,15 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ FIX: Using 'gemini-flash-latest'
-        # This is the "Evergreen" model listed in your API options. 
-        # It automatically points to the most stable Flash version (1.5 or 2.0).
-        self.model = genai.GenerativeModel('gemini-flash-latest', tools=self.tools, system_instruction=self.system_instruction)
+        # ✅ STICKING WITH GEMINI 2.0 (The Winner)
+        self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
         if user_id not in self.active_chats:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
+            self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
+            
         return self.active_chats[user_id].send_message(user_msg).text
 
 # --- 5. LOGIC ENGINE ---
@@ -197,9 +255,9 @@ def whatsapp():
     try:
         reply = agent.chat(sender, incoming_msg)
         send_msg(sender, reply)
-    except Exception as e: # Catch ALL errors, even the weird ones
+    except Exception as e:
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ סליחה, קרתה תקלה: {str(e)}")
+        send_msg(sender, f"⚠️ תקלה: {str(e)}")
         
     return str(MessagingResponse())
 
