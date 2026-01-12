@@ -22,15 +22,13 @@ logger = logging.getLogger("LawyerBot")
 app = Flask(__name__)
 
 class Config:
-    # 🎛️ THE PERSONALITY SWITCH 🎛️
-    # Change this to "EMPATHY" for the warm version.
-    # Change this to "WORKER" for the fast/efficient version.
-    BOT_PERSONALITY = "EMPATHY" 
+    # 🎛️ SETTING: SMART & EMPATHETIC
+    BOT_PERSONALITY = "SMART_EMPATHY" 
     
     BUSINESS_NAME = "Adv. Yahel Baron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
     
-    # 📧 EMAIL CONFIG
+    # 📧 EMAIL CONFIG (Auto-Fix Spaces)
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
@@ -171,40 +169,20 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🎭 DEFINING THE TWO PERSONALITIES
+        # 🧠 THE NEW SMART BRAIN 🧠
+        self.system_instruction = f"""
+        You are an intelligent Intake Assistant for {Config.BUSINESS_NAME}.
         
-        # 1. The Empathic Listener
-        instruction_empathy = f"""
-        You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
-        **Personality:** Empathetic, patient, warm.
-        **Goal:** Make the client feel heard, then get the details.
-        
-        **Process:**
-        1. Listen to the client's story. Acknowledge their pain/difficulty.
-        2. Ask clarifying questions gently.
-        3. Summarize their story and ASK FOR CONFIRMATION.
-        4. ONLY when confirmed, use `save_case_summary`.
+        **YOUR RULES:**
+        1. **BE SHARP:** If the user tells a story, **IMMEDIATELY** extract their Name and the Legal Topic (e.g., Divorce, Custody).
+        2. **DO NOT ASK AGAIN:** If they already said "My name is Yahel", NEVER ask "What is your name?". That is stupid.
+        3. **INFER CONTEXT:** If they talk about "kids" or "separation", the topic is **Family Law**. Don't ask "What is the topic?".
+        4. **BE CONCISE:** Reply in **2 sentences MAX**. Be warm but efficient.
+        5. **VERIFY & SAVE:** Once you have the Name and Topic, ask: "I understood [Name], regarding [Topic]. Shall I file the report?"
+        6. **LANGUAGE:** Professional Hebrew.
         """
         
-        # 2. The Efficient Worker
-        instruction_worker = f"""
-        You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
-        **Personality:** Efficient, direct, professional.
-        **Goal:** Gather facts quickly and file the report.
-        
-        **Process:**
-        1. Ask for: Name, Case Topic, Key Details.
-        2. Do not waste time on small talk.
-        3. Immediately use `save_case_summary` as soon as you have the basic info.
-        """
-        
-        # 🎛️ SELECTING BASED ON CONFIG
-        if Config.BOT_PERSONALITY == "EMPATHY":
-            self.system_instruction = instruction_empathy
-        else:
-            self.system_instruction = instruction_worker
-        
-        # ✅ Using Gemini 2.0
+        # ✅ Using Gemini 2.0 (The Smart One)
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
