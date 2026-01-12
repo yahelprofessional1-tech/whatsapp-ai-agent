@@ -25,9 +25,13 @@ class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
     
-    # 📧 EMAIL CONFIG
+    # 📧 EMAIL CONFIG (Auto-Fixer Added)
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
-    EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+    
+    # 🛠️ FIX: This line removes spaces from the password automatically
+    _raw_pass = os.getenv('EMAIL_PASSWORD', '')
+    EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
+    
     LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
     
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
@@ -35,9 +39,7 @@ class Config:
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
     TWILIO_NUMBER = 'whatsapp:+14155238886'
     
-    # Backup Sheet
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
-    
     CALENDAR_ID = os.getenv('CALENDAR_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
     VIP_NUMBERS = [LAWYER_PHONE]
@@ -85,10 +87,10 @@ create_credentials()
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def send_email_report(name, topic, summary):
-    """Sends a professional HTML email to the lawyer."""
-    # Check if variables exist in Render
+    """Sends a professional HTML email."""
+    # Safety Check
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
-        return "Email Skipped (Missing Config)"
+        return "Email Skipped (Config Missing)"
         
     msg = EmailMessage()
     msg['Subject'] = f"⚖️ תקציר תיק חדש: {name} - {topic}"
@@ -113,14 +115,15 @@ def send_email_report(name, topic, summary):
     msg.add_alternative(html_content, subtype='html')
 
     try:
+        # Timeout added to prevent freezing
         context = ssl.create_default_context()
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as smtp:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=10) as smtp:
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
         return "Email Sent Successfully"
     except Exception as e:
         logger.error(f"Email Failed: {e}")
-        return f"Email Failed: {e}"
+        return f"Email Failed (Bot continued): {e}"
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
@@ -132,15 +135,15 @@ def save_case_summary(name: str, topic: str, summary: str):
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
             except: pass 
 
-        # 2. Send the Email
+        # 2. Send Email
         email_status = send_email_report(name, topic, summary)
         
         # 3. Notify Lawyer via WhatsApp
         if twilio_mgr and Config.LAWYER_PHONE:
-            msg_body = f"📧 *נשלח מייל חדש!* ({topic})\n\n👤 *לקוח:* {name}\nהתקציר המלא ממתין לך במייל."
+            msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס מייל: {email_status})"
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
-        return f"Success. Email: {email_status}"
+        return f"Success. Email Status: {email_status}"
     except Exception as e: return f"Error: {str(e)}"
 
 def book_meeting(client_name: str, reason: str):
@@ -171,7 +174,7 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # Instructions (Hidden from Init)
+        # Instructions (Hidden)
         self.system_instruction = f"""
         You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
         1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary.
@@ -180,16 +183,14 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ USING 'gemini-2.0-flash' (High IQ)
-        # Note: We do NOT pass system_instruction here to avoid the freeze bug.
+        # ✅ USING 'gemini-2.0-flash' (Your Working Model)
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
         if user_id not in self.active_chats:
-            # Start Chat
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
-            # 💉 INJECTION METHOD: The key to stability!
+            # 💉 INJECTION METHOD (Your Working Trick)
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
             
         return self.active_chats[user_id].send_message(user_msg).text
