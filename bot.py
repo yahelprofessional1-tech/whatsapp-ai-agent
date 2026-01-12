@@ -25,7 +25,7 @@ class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
     
-    # 📧 EMAIL CONFIG (NEW)
+    # 📧 EMAIL CONFIG
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
     LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
@@ -35,7 +35,7 @@ class Config:
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
     TWILIO_NUMBER = 'whatsapp:+14155238886'
     
-    # We keep this as a Silent Backup Database (Lawyer doesn't need to look at it)
+    # Backup Sheet
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
     
     CALENDAR_ID = os.getenv('CALENDAR_ID')
@@ -81,20 +81,20 @@ def create_credentials():
 
 create_credentials()
 
-# --- 3. TOOLS (EMAIL ENGINE ADDED) ---
+# --- 3. TOOLS (EMAIL ENGINE) ---
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def send_email_report(name, topic, summary):
     """Sends a professional HTML email to the lawyer."""
+    # Check if variables exist in Render
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
-        return "Email Config Missing"
+        return "Email Skipped (Missing Config)"
         
     msg = EmailMessage()
     msg['Subject'] = f"⚖️ תקציר תיק חדש: {name} - {topic}"
     msg['From'] = Config.EMAIL_SENDER
     msg['To'] = Config.LAWYER_EMAIL
     
-    # Professional HTML Format
     html_content = f"""
     <div dir="rtl" style="font-family: Arial, sans-serif; color: #333;">
         <h2 style="color: #2c3e50;">תקציר תיק חדש התקבל</h2>
@@ -124,18 +124,18 @@ def send_email_report(name, topic, summary):
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
-        # 1. Save to Sheet (Silent Backup)
+        # 1. Silent Backup to Sheets
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
                 sheet = gc.open_by_key(Config.SHEET_ID).sheet1
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
-            except: pass # If sheet fails, we don't care, we rely on email now.
+            except: pass 
 
-        # 2. Send Email (The Main Event)
+        # 2. Send the Email
         email_status = send_email_report(name, topic, summary)
         
-        # 3. Notify Lawyer via WhatsApp (Just a heads up)
+        # 3. Notify Lawyer via WhatsApp
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📧 *נשלח מייל חדש!* ({topic})\n\n👤 *לקוח:* {name}\nהתקציר המלא ממתין לך במייל."
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
@@ -171,6 +171,7 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
+        # Instructions (Hidden from Init)
         self.system_instruction = f"""
         You are the Smart Intake Assistant for {Config.BUSINESS_NAME}.
         1. **Fast-Track:** If a user selects a topic, immediately ask if they want to write a short summary.
@@ -179,13 +180,16 @@ class GeminiAgent:
         4. **Tone:** Professional Hebrew.
         """
         
-        # ✅ STICKING WITH GEMINI 2.0 (The Winner)
+        # ✅ USING 'gemini-2.0-flash' (High IQ)
+        # Note: We do NOT pass system_instruction here to avoid the freeze bug.
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
     def chat(self, user_id, user_msg):
         if user_id not in self.active_chats:
+            # Start Chat
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
+            # 💉 INJECTION METHOD: The key to stability!
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
             
         return self.active_chats[user_id].send_message(user_msg).text
@@ -257,7 +261,7 @@ def whatsapp():
         send_msg(sender, reply)
     except Exception as e:
         logger.error(f"AI Crash: {e}")
-        send_msg(sender, f"⚠️ תקלה: {str(e)}")
+        send_msg(sender, f"⚠️ סליחה, קרתה תקלה: {str(e)}")
         
     return str(MessagingResponse())
 
