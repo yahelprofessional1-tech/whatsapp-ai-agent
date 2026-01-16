@@ -40,7 +40,7 @@ class Config:
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     TWILIO_SID = os.getenv('TWILIO_SID')
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
-    TWILIO_NUMBER = 'whatsapp:+14155238886'
+    TWILIO_NUMBER = os.getenv('WHATSAPP_NUMBER')
     
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
     CALENDAR_ID = os.getenv('CALENDAR_ID')
