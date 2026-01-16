@@ -90,7 +90,7 @@ create_credentials()
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
 def send_email_report(name, topic, summary):
-    """Sends email with safety timeout."""
+    """Sends email using Port 587 (TLS) to bypass firewall blocks."""
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
         return "Email Skipped (Config Missing)"
         
@@ -117,8 +117,11 @@ def send_email_report(name, topic, summary):
     msg.add_alternative(html_content, subtype='html')
 
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=10) as smtp:
+        # 🛠️ FIX: Using Port 587 with STARTTLS instead of 465
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as smtp:
+            smtp.ehlo()
+            smtp.starttls() # Secure the connection
+            smtp.ehlo()
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
         return "Email Sent Successfully"
@@ -172,23 +175,17 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🧠 REALISTIC LEGAL ASSISTANT LOGIC (WITH HEBREW ENFORCEMENT) 🧠
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
         **CRITICAL RULE: YOU MUST SPEAK ONLY IN HEBREW.**
-        (Even if the user writes in English, reply in Hebrew).
-        
-        **YOUR GOAL:** Create a realistic, professional, and empathetic intake experience.
         
         **PHASE 1: LISTENING & TRIAGE**
         - Identify the user's Name and Legal Topic (Divorce, Inheritance, etc.).
         - DO NOT rush. If they write one sentence, ask them to elaborate.
         
-        **PHASE 2: THE PROFESSIONAL FOLLOW-UP (CRITICAL)**
+        **PHASE 2: THE PROFESSIONAL FOLLOW-UP**
         - Before summarizing, ask **ONE** specific legal question relevant to their case.
-          - *Example (Divorce):* "Are there minor children involved, or is this regarding property division?"
-          - *Example (Inheritance):* "Is there a written will that you know of?"
         
         **PHASE 3: THE OPEN DOOR**
         - Ask: "Is there anything else you want to add to the report?"
@@ -197,7 +194,7 @@ class GeminiAgent:
         - Only when they say they are done, show the summary and ask to save.
         
         **ERROR HANDLING:**
-        - If `save_case_summary` fails (Email Failed), **TELL THE USER THE ERROR IN ENGLISH/HEBREW**.
+        - If `save_case_summary` returns "Email Failed", **TELL THE USER**.
         """
         
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
