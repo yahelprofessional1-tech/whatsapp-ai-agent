@@ -22,10 +22,7 @@ logger = logging.getLogger("LawyerBot")
 app = Flask(__name__)
 
 class Config:
-    # 🎛️ SETTING: SMART & EMPATHETIC
-    BOT_PERSONALITY = "SMART_EMPATHY" 
-    
-    BUSINESS_NAME = "Adv. Yahel Baron"
+    BUSINESS_NAME = "Adv. Yahel Boaron"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE')
     
     # 📧 EMAIL CONFIG (Auto-Fix Spaces)
@@ -48,7 +45,7 @@ class Config:
     # 📋 MENU
     FLOW_STATES = {
         "START": {
-            "message": """שלום, הגעתם למשרד עורכי דין יעל ברון. ⚖️
+            "message": """שלום, הגעתם למשרד עורכי דין יהל בוארון. ⚖️
 אני העוזר החכם של המשרד.
 
 אני כאן כדי לעזור לך לקדם את התיק במהירות.
@@ -115,13 +112,15 @@ def send_email_report(name, topic, summary):
 
     try:
         context = ssl.create_default_context()
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=5) as smtp:
+        # Timeout increased to 15 seconds to be safe
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=15) as smtp:
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
         return "Email Sent Successfully"
     except Exception as e:
         logger.error(f"Email Failed: {e}")
-        return f"Email Failed: {str(e)[:1200]}"
+        # Return the RAW error so we can see it in WhatsApp
+        return f"Email Failed: {str(e)}"
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
@@ -138,7 +137,7 @@ def save_case_summary(name: str, topic: str, summary: str):
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס מייל: {email_status})"
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
-        return f"Success. Email Status: {email_status}"
+        return f"Operation Finished. Email Status: {email_status}"
     except Exception as e: return f"Error: {str(e)[:1200]}"
 
 def book_meeting(client_name: str, reason: str):
@@ -169,20 +168,34 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🧠 THE NEW SMART BRAIN 🧠
+        # 🧠 REALISTIC LEGAL ASSISTANT LOGIC 🧠
         self.system_instruction = f"""
-        You are an intelligent Intake Assistant for {Config.BUSINESS_NAME}.
+        You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
-        **YOUR RULES:**
-        1. **BE SHARP:** If the user tells a story, **IMMEDIATELY** extract their Name and the Legal Topic (e.g., Divorce, Custody).
-        2. **DO NOT ASK AGAIN:** If they already said "My name is Yahel", NEVER ask "What is your name?". That is stupid.
-        3. **INFER CONTEXT:** If they talk about "kids" or "separation", the topic is **Family Law**. Don't ask "What is the topic?".
-        4. **BE CONCISE:** Reply in **2 sentences MAX**. Be warm but efficient.
-        5. **VERIFY & SAVE:** Once you have the Name and Topic, ask: "I understood [Name], regarding [Topic]. Shall I file the report?"
-        6. **LANGUAGE:** Professional Hebrew.
+        **YOUR GOAL:** Create a realistic, professional, and empathetic intake experience.
+        
+        **PHASE 1: LISTENING & TRIAGE**
+        - Identify the user's Name and Legal Topic (Divorce, Inheritance, etc.).
+        - DO NOT rush. If they write one sentence, ask them to elaborate.
+        
+        **PHASE 2: THE PROFESSIONAL FOLLOW-UP (CRITICAL)**
+        - Before summarizing, ask **ONE** specific legal question relevant to their case to help the lawyer.
+          - *Example (Divorce):* "Are there minor children involved, or is this regarding property division?"
+          - *Example (Inheritance):* "Is there a written will that you know of?"
+          - *Example (Contracts):* "Is the contract already signed?"
+        
+        **PHASE 3: THE OPEN DOOR**
+        - Ask: "Is there anything else you want to add to the report?"
+        
+        **PHASE 4: EXECUTION**
+        - Only when they say they are done, show the summary and ask to save.
+        
+        **ERROR HANDLING:**
+        - If the tool `save_case_summary` returns an error message starting with "Email Failed", **YOU MUST SHOW THE USER THE ERROR**.
+        - Say: "I saved the data to the backup, but the Email failed because: [INSERT EXACT ERROR TEXT]".
         """
         
-        # ✅ Using Gemini 2.0 (The Smart One)
+        # ✅ Using Gemini 2.0
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
