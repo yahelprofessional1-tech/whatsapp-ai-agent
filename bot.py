@@ -24,15 +24,14 @@ app = Flask(__name__)
 class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     
-    # 📞 PHONE CONFIG (התיקון לשגיאת ה-Invalid Pair)
+    # 📞 PHONE CONFIG
     _raw_phone = os.getenv('LAWYER_PHONE', '')
-    # אם המספר לא מתחיל ב-'whatsapp:', נוסיף את זה ידנית
     if _raw_phone and not _raw_phone.startswith('whatsapp:'):
         LAWYER_PHONE = f"whatsapp:{_raw_phone}"
     else:
         LAWYER_PHONE = _raw_phone
 
-    # 📧 EMAIL CONFIG (התיקון לסיסמה)
+    # 📧 EMAIL CONFIG
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
@@ -129,7 +128,6 @@ def send_email_report(name, topic, summary):
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
-        # 1. Sheets
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -137,13 +135,10 @@ def save_case_summary(name: str, topic: str, summary: str):
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
             except: pass 
 
-        # 2. Email
         email_status = send_email_report(name, topic, summary)
         
-        # 3. WhatsApp Notification (החלק שתוקן)
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס מייל: {email_status})"
-            # עכשיו LAWYER_PHONE כולל בטוח את הקידומת
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
         return f"Operation Finished. Email Status: {email_status}"
@@ -177,9 +172,12 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🧠 הנה ההוראות שאהבת - לא נגעתי בהן 🧠
+        # 🧠 REALISTIC LEGAL ASSISTANT LOGIC (WITH HEBREW ENFORCEMENT) 🧠
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
+        
+        **CRITICAL RULE: YOU MUST SPEAK ONLY IN HEBREW.**
+        (Even if the user writes in English, reply in Hebrew).
         
         **YOUR GOAL:** Create a realistic, professional, and empathetic intake experience.
         
@@ -188,7 +186,7 @@ class GeminiAgent:
         - DO NOT rush. If they write one sentence, ask them to elaborate.
         
         **PHASE 2: THE PROFESSIONAL FOLLOW-UP (CRITICAL)**
-        - Before summarizing, ask **ONE** specific legal question relevant to their case to help the lawyer.
+        - Before summarizing, ask **ONE** specific legal question relevant to their case.
           - *Example (Divorce):* "Are there minor children involved, or is this regarding property division?"
           - *Example (Inheritance):* "Is there a written will that you know of?"
         
@@ -199,10 +197,9 @@ class GeminiAgent:
         - Only when they say they are done, show the summary and ask to save.
         
         **ERROR HANDLING:**
-        - If the tool `save_case_summary` returns an error message starting with "Email Failed", **YOU MUST SHOW THE USER THE ERROR**.
+        - If `save_case_summary` fails (Email Failed), **TELL THE USER THE ERROR IN ENGLISH/HEBREW**.
         """
         
-        # ✅ Using Gemini 2.0
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
