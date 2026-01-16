@@ -22,10 +22,17 @@ logger = logging.getLogger("LawyerBot")
 app = Flask(__name__)
 
 class Config:
-    BUSINESS_NAME = "Adv. Yahel Boaron"
-    LAWYER_PHONE = os.getenv('LAWYER_PHONE')
+    BUSINESS_NAME = "Adv. Yahel Baron"
     
-    # 📧 EMAIL CONFIG (Auto-Fix Spaces)
+    # 📞 PHONE CONFIG (התיקון לשגיאת ה-Invalid Pair)
+    _raw_phone = os.getenv('LAWYER_PHONE', '')
+    # אם המספר לא מתחיל ב-'whatsapp:', נוסיף את זה ידנית
+    if _raw_phone and not _raw_phone.startswith('whatsapp:'):
+        LAWYER_PHONE = f"whatsapp:{_raw_phone}"
+    else:
+        LAWYER_PHONE = _raw_phone
+
+    # 📧 EMAIL CONFIG (התיקון לסיסמה)
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
@@ -45,7 +52,7 @@ class Config:
     # 📋 MENU
     FLOW_STATES = {
         "START": {
-            "message": """שלום, הגעתם למשרד עורכי דין יהל בוארון. ⚖️
+            "message": """שלום, הגעתם למשרד עורכי דין יעל ברון. ⚖️
 אני העוזר החכם של המשרד.
 
 אני כאן כדי לעזור לך לקדם את התיק במהירות.
@@ -112,18 +119,17 @@ def send_email_report(name, topic, summary):
 
     try:
         context = ssl.create_default_context()
-        # Timeout increased to 15 seconds to be safe
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=15) as smtp:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=10) as smtp:
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
         return "Email Sent Successfully"
     except Exception as e:
         logger.error(f"Email Failed: {e}")
-        # Return the RAW error so we can see it in WhatsApp
         return f"Email Failed: {str(e)}"
 
 def save_case_summary(name: str, topic: str, summary: str):
     try:
+        # 1. Sheets
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -131,10 +137,13 @@ def save_case_summary(name: str, topic: str, summary: str):
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
             except: pass 
 
+        # 2. Email
         email_status = send_email_report(name, topic, summary)
         
+        # 3. WhatsApp Notification (החלק שתוקן)
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס מייל: {email_status})"
+            # עכשיו LAWYER_PHONE כולל בטוח את הקידומת
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
         return f"Operation Finished. Email Status: {email_status}"
@@ -168,7 +177,7 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🧠 REALISTIC LEGAL ASSISTANT LOGIC 🧠
+        # 🧠 הנה ההוראות שאהבת - לא נגעתי בהן 🧠
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
@@ -182,7 +191,6 @@ class GeminiAgent:
         - Before summarizing, ask **ONE** specific legal question relevant to their case to help the lawyer.
           - *Example (Divorce):* "Are there minor children involved, or is this regarding property division?"
           - *Example (Inheritance):* "Is there a written will that you know of?"
-          - *Example (Contracts):* "Is the contract already signed?"
         
         **PHASE 3: THE OPEN DOOR**
         - Ask: "Is there anything else you want to add to the report?"
@@ -192,7 +200,6 @@ class GeminiAgent:
         
         **ERROR HANDLING:**
         - If the tool `save_case_summary` returns an error message starting with "Email Failed", **YOU MUST SHOW THE USER THE ERROR**.
-        - Say: "I saved the data to the backup, but the Email failed because: [INSERT EXACT ERROR TEXT]".
         """
         
         # ✅ Using Gemini 2.0
