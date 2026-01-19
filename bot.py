@@ -23,28 +23,33 @@ app = Flask(__name__)
 class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     
+    # Phone Config
     _raw_phone = os.getenv('LAWYER_PHONE', '')
     if _raw_phone and not _raw_phone.startswith('whatsapp:'):
         LAWYER_PHONE = f"whatsapp:{_raw_phone}"
     else:
         LAWYER_PHONE = _raw_phone
 
+    # Email Config
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
     LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
     
+    # API Keys
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     TWILIO_SID = os.getenv('TWILIO_SID')
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
     TWILIO_NUMBER = os.getenv('WHATSAPP_NUMBER')
     
+    # Services
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
     CALENDAR_ID = os.getenv('CALENDAR_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
     VIP_NUMBERS = [LAWYER_PHONE]
     COOL_DOWN_HOURS = 24
     
+    # Menu Config
     FLOW_STATES = {
         "START": {
             "message": """שלום, הגעתם למשרד עורכי דין יהל ברון. ⚖️
@@ -109,27 +114,36 @@ def send_email_report(name, topic, summary, phone):
 
 def save_case_summary(name: str, topic: str, summary: str, phone: str):
     """
-    Saves the case summary. 
-    The 'phone' argument is automatically extracted from the WhatsApp ID.
+    Saves summary + sends Magic Link to lawyer.
     """
     try:
-        # 1. Sheets
+        # Prepare Data
+        clean_phone = phone.replace("whatsapp:", "")
+        link_phone = clean_phone.replace("+", "") 
+        wa_link = f"https://wa.me/{link_phone}"
+
+        # 1. Sheets Save
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
                 sheet = gc.open_by_key(Config.SHEET_ID).sheet1
-                # Clean phone number (remove whatsapp: prefix if exists)
-                clean_phone = phone.replace("whatsapp:", "")
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, clean_phone, topic, summary])
             except: pass 
 
-        # 2. Email
-        clean_phone = phone.replace("whatsapp:", "")
-        email_status = send_email_report(name, topic, summary, clean_phone)
+        # 2. Email Save
+        send_email_report(name, topic, summary, clean_phone)
         
-        # 3. WhatsApp Alert to Lawyer
+        # 3. WhatsApp Alert (With Magic Link)
         if twilio_mgr and Config.LAWYER_PHONE:
-            msg_body = f"📝 *ליד חדש!* ({topic})\n\n👤 *שם:* {name}\n📱 *טלפון:* {clean_phone}\n📄 *סיכום:* {summary}"
+            msg_body = f"""📝 *ליד חדש התקבל!*
+            
+👤 *שם:* {name}
+📌 *נושא:* {topic}
+📄 *סיכום:* {summary}
+
+👇 *לחץ כאן לשיחה עם הלקוח:*
+{wa_link}"""
+            
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
         return f"Details saved. Client: {name}, Phone: {clean_phone}"
@@ -160,7 +174,7 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🔥 UPGRADE: Strict instruction to NOT ask for phone number
+        # SYSTEM INSTRUCTION: Strict, Concise, No Phone Questions
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
@@ -187,10 +201,8 @@ class GeminiAgent:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
             
-        # 🔥 SILENT INJECTION: We whisper the phone number to the AI here
-        # The user does not see this line. Only the AI sees it.
+        # SILENT INJECTION: Whispering the phone number to the AI
         context_msg = f"[System Data - Current User Phone: {user_id}] User says: {user_msg}"
-        
         return self.active_chats[user_id].send_message(context_msg).text
 
 # --- 5. LOGIC ENGINE ---
@@ -218,6 +230,15 @@ def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     
+    # 🕵️ HIDDEN RESET BUTTON (Type "reset")
+    if incoming_msg.lower() == "reset":
+        if sender in user_sessions: del user_sessions[sender]
+        if sender in agent.active_chats: del agent.active_chats[sender]
+        user_sessions[sender] = 'START'
+        state = Config.FLOW_STATES['START']
+        send_menu(sender, "🔄 *System Reset Success.*\n\n" + state['message'], state['options'])
+        return str(MessagingResponse())
+
     if sender not in user_sessions: 
         user_sessions[sender] = 'START'
         state = Config.FLOW_STATES['START']
@@ -235,7 +256,7 @@ def whatsapp():
                 user_sessions[sender] = 'AI_MODE'
                 topic = selected['label']
                 try:
-                    # Injecting the phone here too so it knows it from the start
+                    # Inject phone from start
                     start_prompt = f"[System Data - Current User Phone: {sender}] The user selected {topic}. Ask them for their name and a short summary."
                     reply = agent.chat(sender, start_prompt)
                     send_msg(sender, reply)
