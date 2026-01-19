@@ -21,9 +21,9 @@ logger = logging.getLogger("LawyerBot")
 app = Flask(__name__)
 
 class Config:
-    BUSINESS_NAME = "Adv. Shimon Hasky" # השם הנכון
+    BUSINESS_NAME = "Adv. Shimon Hasky" # השם שיופיע ללקוח
     
-    # Template ID (הקוד של שמעון חסקי)
+    # Template ID (הקוד המאושר שלך מטוויליו)
     CONTENT_SID = "HX28b3beac873cd8dba0852c183b8bf0ea" 
 
     # Phone Config
@@ -162,33 +162,37 @@ def book_meeting(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)[:1200]}"
 
-# --- 4. AI AGENT (STRICT MODE) ---
+# --- 4. AI AGENT (EMPATHETIC & DIRECT) ---
 class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # הוראות קשוחות למניעת קוד והזיות
+        # הוראות הבוט - אמפתי, מקצועי, ללא קוד
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
         **ROLE:**
-        You are a polite, efficient legal clerk. You speak HEBREW ONLY.
+        You are a supportive, reassuring legal assistant. You speak HEBREW ONLY.
         
         **GOAL:**
-        Get the client's Name and Legal Issue.
+        Get the client's Name and Legal Issue efficiently.
+        
+        **RESPONSE STYLE:**
+        If the user mentions a difficult situation (divorce, debt, trouble), use this EXACT pattern:
+        1. **Acknowledge:** "מצטער/ת לשמוע, נעשה כמיטב יכולתנו כדי לעזור."
+        2. **Action:** Ask for their name (if missing) or the specific details.
         
         **CRITICAL RULES:**
-        1. **NO CODE:** NEVER write python code, function signatures, or 'print(...)'.
-        2. **USE THE TOOL:** When you have the Name and Topic, you MUST explicitly call the `save_case_summary` tool.
-        3. **NO PHONE ASKING:** You already have the phone number (in context). DO NOT ASK FOR IT.
-        4. **BE CONCISE:** Keep answers short (1-2 sentences).
+        1. **NO CODE:** NEVER write python code.
+        2. **NO PHONE ASKING:** You already have the phone number. DO NOT ASK FOR IT.
+        3. **KEEP IT CONCISE:** Don't write long paragraphs.
         
         **PROCESS:**
-        1. Ask for the Name (if missing).
-        2. Ask for the Issue (if missing).
-        3. Call `save_case_summary(name, topic, summary, phone)`.
-        4. After the tool runs, say: "הפרטים נשמרו בהצלחה. עו"ד חסקי ייצור קשר בקרוב."
+        1. Acknowledge user's pain/issue.
+        2. Get Name & Topic.
+        3. Call `save_case_summary`.
+        4. End with: "הפרטים נשמרו. עו"ד חסקי ייצור קשר בקרוב."
         """
         
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
@@ -203,7 +207,6 @@ class GeminiAgent:
         
         try:
             response = self.active_chats[user_id].send_message(context_msg)
-            # אם ה-AI מחזיר תשובה ריקה (קורה לפעמים בהפעלת כלי), נחזיר הודעת אישור
             if not response.text:
                 return "הפרטים נשמרו. תודה."
             return response.text
@@ -221,13 +224,16 @@ def status():
     status = request.values.get('DialCallStatus', '')
     raw_caller = request.values.get('From', '')
     
+    # המרת מספר לפורמט וואטסאפ
     if raw_caller and not raw_caller.startswith('whatsapp:'):
         caller = f"whatsapp:{raw_caller}"
     else:
         caller = raw_caller
 
+    # טיפול בשיחה שלא נענתה
     if status in ['no-answer', 'busy', 'failed', 'canceled'] or request.values.get('CallStatus') == 'ringing':
         
+        # דילוג על מספר ה-VIP (העורך דין)
         if caller in Config.VIP_NUMBERS: return str(VoiceResponse())
         
         now = datetime.datetime.now()
@@ -236,7 +242,7 @@ def status():
             return str(VoiceResponse())
             
         try:
-            # שליחת התבנית המאושרת
+            # שליחת התבנית המאושרת (HX...)
             twilio_mgr.messages.create(
                 from_=Config.TWILIO_NUMBER,
                 to=caller,
@@ -247,8 +253,8 @@ def status():
 
         except Exception as e:
             logger.error(f"Template Failed: {e}")
+            # במקרה חירום: טקסט רגיל
             try:
-                # גיבוי טקסט רגיל
                 backup_text = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. אנו בשיחה כרגע. איך אפשר לעזור?"
                 twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=caller, body=backup_text)
             except: pass
@@ -260,7 +266,7 @@ def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     
-    # פקודת איפוס סודית
+    # פקודת איפוס (Reset)
     if incoming_msg.lower() == "reset":
         if sender in user_sessions: del user_sessions[sender]
         if sender in agent.active_chats: del agent.active_chats[sender]
@@ -277,6 +283,7 @@ def whatsapp():
 
     current_state = user_sessions[sender]
 
+    # טיפול בבחירות מהתפריט
     if incoming_msg.isdigit():
         idx = int(incoming_msg) - 1
         options = Config.FLOW_STATES['START']['options']
@@ -307,6 +314,7 @@ def whatsapp():
         user_sessions[sender] = 'START'
         return str(MessagingResponse())
 
+    # שליחה ל-AI
     try:
         reply = agent.chat(sender, incoming_msg)
         send_msg(sender, reply)
@@ -327,7 +335,7 @@ def send_menu(to, body, options):
 def send_msg(to, body):
     if twilio_mgr: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=body, to=to)
 
-# --- UPTIME ---
+# --- UPTIME ENDPOINT ---
 @app.route("/", methods=['GET'])
 def keep_alive():
     return "I am alive!", 200
