@@ -298,5 +298,12 @@ def send_menu(to, body, options):
 def send_msg(to, body):
     if twilio_mgr: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=body, to=to)
 
+@app.route("/", methods=['GET'])
+def keep_alive():
+    return "I am alive!", 200
+
 if __name__ == "__main__":
+    
     app.run(port=5000, debug=True)
+    
+    
