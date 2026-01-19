@@ -212,17 +212,35 @@ last_auto_replies = {}
 
 @app.route("/status", methods=['POST'])
 def status(): 
+    """
+    Handles incoming Voice Calls.
+    If a call is missed/busy, sends a WhatsApp message.
+    """
     status = request.values.get('DialCallStatus', '')
-    caller = request.values.get('From', '')
+    raw_caller = request.values.get('From', '')
+
+    # --- FIX: Convert regular phone number to WhatsApp format ---
+    # Incoming call: +97250... -> WhatsApp Outgoing: whatsapp:+97250...
+    if raw_caller and not raw_caller.startswith('whatsapp:'):
+        caller = f"whatsapp:{raw_caller}"
+    else:
+        caller = raw_caller
+    # ------------------------------------------------------------
+
     if status in ['no-answer', 'busy', 'failed', 'canceled'] or request.values.get('CallStatus') == 'ringing':
         if caller in Config.VIP_NUMBERS: return str(VoiceResponse())
+        
         now = datetime.datetime.now()
         last = last_auto_replies.get(caller)
+        # Cooldown check (don't spam if they call 5 times in a row)
         if last and (now - last).total_seconds() < (Config.COOL_DOWN_HOURS * 3600):
             return str(VoiceResponse())
+            
         state = Config.FLOW_STATES['START']
-        send_menu(caller, "הגעתם למשרד, אנו בשיחה.\n" + state['message'], state['options'])
+        # Send the "We missed you" message
+        send_menu(caller, "הגעתם למשרד, אנו בשיחה כרגע.\n" + state['message'], state['options'])
         last_auto_replies[caller] = now
+        
     return str(VoiceResponse())
 
 @app.route("/whatsapp", methods=['POST'])
@@ -298,12 +316,10 @@ def send_menu(to, body, options):
 def send_msg(to, body):
     if twilio_mgr: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=body, to=to)
 
+# --- UPTIME ROBOT KEEPER (Must be OUTSIDE the main block) ---
 @app.route("/", methods=['GET'])
 def keep_alive():
     return "I am alive!", 200
 
 if __name__ == "__main__":
-    
     app.run(port=5000, debug=True)
-    
-    
