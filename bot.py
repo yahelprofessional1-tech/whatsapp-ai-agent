@@ -3,7 +3,6 @@ import json
 import datetime
 import logging
 import smtplib
-import ssl
 from email.message import EmailMessage
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
@@ -24,14 +23,12 @@ app = Flask(__name__)
 class Config:
     BUSINESS_NAME = "Adv. Yahel Baron"
     
-    # 📞 PHONE CONFIG (התיקון לוואטסאפ שאהבת - נשאר)
     _raw_phone = os.getenv('LAWYER_PHONE', '')
     if _raw_phone and not _raw_phone.startswith('whatsapp:'):
         LAWYER_PHONE = f"whatsapp:{_raw_phone}"
     else:
         LAWYER_PHONE = _raw_phone
 
-    # 📧 EMAIL CONFIG
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
@@ -48,14 +45,12 @@ class Config:
     VIP_NUMBERS = [LAWYER_PHONE]
     COOL_DOWN_HOURS = 24
     
-    # 📋 MENU
     FLOW_STATES = {
         "START": {
-            "message": """שלום, הגעתם למשרד עורכי דין יעל ברון. ⚖️
+            "message": """שלום, הגעתם למשרד עורכי דין יהל ברון. ⚖️
 אני העוזר החכם של המשרד.
 
-אני כאן כדי לעזור לך לקדם את התיק במהירות.
-תוכל לבחור נושא, או **לכתוב לי תקציר של המקרה שלך כבר עכשיו**.
+כדי שנתקדם, תוכל לבחור נושא, או לכתוב לי ישר מה קרה.
 
 1️⃣ גירושין
 2️⃣ משמורת ילדים
@@ -89,55 +84,55 @@ create_credentials()
 # --- 3. TOOLS ---
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
-def send_email_report(name, topic, summary):
-    """
-    Attempts to send email. 
-    If it fails (Firewall/Block), it returns a safe message so the bot doesn't crash.
-    """
+def send_email_report(name, topic, summary, phone):
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
         return "Skipped (Config Missing)"
         
     msg = EmailMessage()
-    msg['Subject'] = f"⚖️ תקציר תיק חדש: {name} - {topic}"
+    msg['Subject'] = f"⚖️ ליד חדש: {name} - {topic}"
     msg['From'] = Config.EMAIL_SENDER
     msg['To'] = Config.LAWYER_EMAIL
     
-    # Simple text content for reliability
-    msg.set_content(f"לקוח: {name}\nנושא: {topic}\n\n{summary}")
+    msg.set_content(f"שם לקוח: {name}\nטלפון: {phone}\nנושא: {topic}\n\nתקציר המקרה:\n{summary}")
 
     try:
-        # Trying Port 587 (Standard TLS)
         with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as smtp:
             smtp.ehlo()
             smtp.starttls()
             smtp.ehlo()
             smtp.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             smtp.send_message(msg)
-        return "Email Sent Successfully"
+        return "Email Sent"
     except Exception as e:
-        logger.error(f"Email Blocked/Failed: {e}")
-        # השינוי היחיד: מחזירים הודעה רגועה
-        return "Saved to Database (Email blocked by Firewall)"
+        logger.error(f"Email Failed: {e}")
+        return "Email Disabled (Firewall)"
 
-def save_case_summary(name: str, topic: str, summary: str):
+def save_case_summary(name: str, topic: str, summary: str, phone: str):
+    """
+    Saves the case summary. 
+    The 'phone' argument is automatically extracted from the WhatsApp ID.
+    """
     try:
-        # 1. Sheets (תמיד עובד)
+        # 1. Sheets
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
                 sheet = gc.open_by_key(Config.SHEET_ID).sheet1
-                sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, summary, topic, "Pending Review"])
+                # Clean phone number (remove whatsapp: prefix if exists)
+                clean_phone = phone.replace("whatsapp:", "")
+                sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, clean_phone, topic, summary])
             except: pass 
 
-        # 2. Email (מנסה, ואם נכשל - לא נורא)
-        email_status = send_email_report(name, topic, summary)
+        # 2. Email
+        clean_phone = phone.replace("whatsapp:", "")
+        email_status = send_email_report(name, topic, summary, clean_phone)
         
-        # 3. WhatsApp (תמיד עובד)
+        # 3. WhatsApp Alert to Lawyer
         if twilio_mgr and Config.LAWYER_PHONE:
-            msg_body = f"📝 *תיק חדש התקבל!* ({topic})\n\n👤 *לקוח:* {name}\n📄 *תקציר:* {summary}\n\n(סטטוס טכני: {email_status})"
+            msg_body = f"📝 *ליד חדש!* ({topic})\n\n👤 *שם:* {name}\n📱 *טלפון:* {clean_phone}\n📄 *סיכום:* {summary}"
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
-        return f"Operation Successful. Status: {email_status}"
+        return f"Details saved. Client: {name}, Phone: {clean_phone}"
     except Exception as e: return f"Error: {str(e)[:100]}"
 
 def book_meeting(client_name: str, reason: str):
@@ -156,9 +151,6 @@ def book_meeting(client_name: str, reason: str):
             'end': {'dateTime': end, 'timeZone': 'Asia/Jerusalem'}
         }
         calendar.events().insert(calendarId=Config.CALENDAR_ID, body=event).execute()
-        
-        if twilio_mgr and Config.LAWYER_PHONE:
-             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=f"📅 *פגישה חדשה!* {client_name}", to=Config.LAWYER_PHONE)
         return "Success: Meeting booked for tomorrow at 10:00 AM."
     except Exception as e: return f"Error: {str(e)[:1200]}"
 
@@ -168,32 +160,23 @@ class GeminiAgent:
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
         
-        # 🧠 המוח המקורי שאהבת (לא נגעתי בפסיק!) 🧠
+        # 🔥 UPGRADE: Strict instruction to NOT ask for phone number
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
         
-        **CRITICAL RULE: YOU MUST SPEAK ONLY IN HEBREW.**
-        (Even if the user writes in English, reply in Hebrew).
+        **RULES:**
+        1. **SPEAK HEBREW ONLY.**
+        2. **BE CONCISE:** Write short sentences. Act like an efficient clerk. No fluff.
+        3. **GET THE NAME:** You MUST ask for the client's name if they haven't said it.
+        4. **NO PHONE QUESTIONS:** You ALREADY possess the user's phone number in the system context. **NEVER ASK FOR IT.**
         
-        **YOUR GOAL:** Create a realistic, professional, and empathetic intake experience.
+        **PROTOCOL:**
+        1. **Understand:** Ask 1-2 sharp questions to understand the legal issue.
+        2. **Details:** Ensure you have the Name and the Issue.
+        3. **Save:** When you have the details, call `save_case_summary`.
+           - **CRITICAL:** Pass the 'phone' value provided in the system context to the function.
         
-        **PHASE 1: LISTENING & TRIAGE**
-        - Identify the user's Name and Legal Topic (Divorce, Inheritance, etc.).
-        - DO NOT rush. If they write one sentence, ask them to elaborate.
-        
-        **PHASE 2: THE PROFESSIONAL FOLLOW-UP (CRITICAL)**
-        - Before summarizing, ask **ONE** specific legal question relevant to their case.
-          - *Example (Divorce):* "Are there minor children involved, or is this regarding property division?"
-          - *Example (Inheritance):* "Is there a written will that you know of?"
-        
-        **PHASE 3: THE OPEN DOOR**
-        - Ask: "Is there anything else you want to add to the report?"
-        
-        **PHASE 4: EXECUTION**
-        - Only when they say they are done, show the summary and ask to save.
-        
-        **ERROR HANDLING:**
-        - If the tool says "Saved to Database", tell the user: "הפרטים נשמרו בהצלחה והועברו לעו"ד ברון."
+        **After saving:** Tell the user "הפרטים נשמרו. עו"ד ברון ייצור קשר בקרוב." and end the chat.
         """
         
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
@@ -204,7 +187,11 @@ class GeminiAgent:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
             
-        return self.active_chats[user_id].send_message(user_msg).text
+        # 🔥 SILENT INJECTION: We whisper the phone number to the AI here
+        # The user does not see this line. Only the AI sees it.
+        context_msg = f"[System Data - Current User Phone: {user_id}] User says: {user_msg}"
+        
+        return self.active_chats[user_id].send_message(context_msg).text
 
 # --- 5. LOGIC ENGINE ---
 agent = GeminiAgent()
@@ -248,7 +235,9 @@ def whatsapp():
                 user_sessions[sender] = 'AI_MODE'
                 topic = selected['label']
                 try:
-                    reply = agent.chat(sender, f"The user selected {topic}. Offer them to write a summary.")
+                    # Injecting the phone here too so it knows it from the start
+                    start_prompt = f"[System Data - Current User Phone: {sender}] The user selected {topic}. Ask them for their name and a short summary."
+                    reply = agent.chat(sender, start_prompt)
                     send_msg(sender, reply)
                 except Exception as e:
                     send_msg(sender, f"AI Error: {str(e)[:1200]}")
@@ -259,7 +248,7 @@ def whatsapp():
                 return str(MessagingResponse())
             elif selected['next'] == 'AI_MODE':
                 user_sessions[sender] = 'AI_MODE'
-                send_msg(sender, "שלום! אני כאן. איך אפשר לעזור?")
+                send_msg(sender, "שלום. אני העוזר הדיגיטלי. במה אפשר לעזור?")
                 return str(MessagingResponse())
 
     if current_state == 'ASK_BOOKING':
