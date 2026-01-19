@@ -21,8 +21,11 @@ logger = logging.getLogger("LawyerBot")
 app = Flask(__name__)
 
 class Config:
-    BUSINESS_NAME = "Adv. Yahel Baron"
+    BUSINESS_NAME = "Adv. Shimon Hasky" # השם החדש
     
+    # Template ID (הקוד שהבאת מטוויליו)
+    CONTENT_SID = "HX28b3beac873cd8dba0852c183b8bf0ea" 
+
     # Phone Config
     _raw_phone = os.getenv('LAWYER_PHONE', '')
     if _raw_phone and not _raw_phone.startswith('whatsapp:'):
@@ -49,10 +52,10 @@ class Config:
     VIP_NUMBERS = [LAWYER_PHONE]
     COOL_DOWN_HOURS = 24
     
-    # Menu Config
+    # Menu Config (שמעון חסקי)
     FLOW_STATES = {
         "START": {
-            "message": """שלום, הגעתם למשרד עורכי דין יהל ברון. ⚖️
+            "message": """שלום, הגעתם למשרד עו"ד שמעון חסקי. ⚖️
 אני העוזר החכם של המשרד.
 
 כדי שנתקדם, תוכל לבחור נושא, או לכתוב לי ישר מה קרה.
@@ -113,16 +116,11 @@ def send_email_report(name, topic, summary, phone):
         return "Email Disabled (Firewall)"
 
 def save_case_summary(name: str, topic: str, summary: str, phone: str):
-    """
-    Saves summary + sends Magic Link to lawyer.
-    """
     try:
-        # Prepare Data
         clean_phone = phone.replace("whatsapp:", "")
         link_phone = clean_phone.replace("+", "") 
         wa_link = f"https://wa.me/{link_phone}"
 
-        # 1. Sheets Save
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
@@ -130,20 +128,16 @@ def save_case_summary(name: str, topic: str, summary: str, phone: str):
                 sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "CASE SUMMARY", name, clean_phone, topic, summary])
             except: pass 
 
-        # 2. Email Save
         send_email_report(name, topic, summary, clean_phone)
         
-        # 3. WhatsApp Alert (With Magic Link)
         if twilio_mgr and Config.LAWYER_PHONE:
             msg_body = f"""📝 *ליד חדש התקבל!*
-            
 👤 *שם:* {name}
 📌 *נושא:* {topic}
 📄 *סיכום:* {summary}
 
 👇 *לחץ כאן לשיחה עם הלקוח:*
 {wa_link}"""
-            
             twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
             
         return f"Details saved. Client: {name}, Phone: {clean_phone}"
@@ -173,26 +167,19 @@ class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
         self.tools = [save_case_summary, book_meeting]
-        
-        # SYSTEM INSTRUCTION: Strict, Concise, No Phone Questions
         self.system_instruction = f"""
         You are the Intake Assistant for {Config.BUSINESS_NAME}.
-        
         **RULES:**
         1. **SPEAK HEBREW ONLY.**
         2. **BE CONCISE:** Write short sentences. Act like an efficient clerk. No fluff.
         3. **GET THE NAME:** You MUST ask for the client's name if they haven't said it.
         4. **NO PHONE QUESTIONS:** You ALREADY possess the user's phone number in the system context. **NEVER ASK FOR IT.**
-        
         **PROTOCOL:**
         1. **Understand:** Ask 1-2 sharp questions to understand the legal issue.
         2. **Details:** Ensure you have the Name and the Issue.
-        3. **Save:** When you have the details, call `save_case_summary`.
-           - **CRITICAL:** Pass the 'phone' value provided in the system context to the function.
-        
-        **After saving:** Tell the user "הפרטים נשמרו. עו"ד ברון ייצור קשר בקרוב." and end the chat.
+        3. **Save:** Call `save_case_summary`. Pass the 'phone' provided in the system context.
+        **After saving:** Tell the user "הפרטים נשמרו. עו"ד חסקי ייצור קשר בקרוב." and end the chat.
         """
-        
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
         self.active_chats = {}
 
@@ -200,8 +187,6 @@ class GeminiAgent:
         if user_id not in self.active_chats:
             self.active_chats[user_id] = self.model.start_chat(enable_automatic_function_calling=True)
             self.active_chats[user_id].send_message(f"SYSTEM INSTRUCTION: {self.system_instruction}")
-            
-        # SILENT INJECTION: Whispering the phone number to the AI
         context_msg = f"[System Data - Current User Phone: {user_id}] User says: {user_msg}"
         return self.active_chats[user_id].send_message(context_msg).text
 
@@ -212,34 +197,41 @@ last_auto_replies = {}
 
 @app.route("/status", methods=['POST'])
 def status(): 
-    """
-    Handles incoming Voice Calls.
-    If a call is missed/busy, sends a WhatsApp message.
-    """
     status = request.values.get('DialCallStatus', '')
     raw_caller = request.values.get('From', '')
-
-    # --- FIX: Convert regular phone number to WhatsApp format ---
-    # Incoming call: +97250... -> WhatsApp Outgoing: whatsapp:+97250...
+    
+    # 1. המרה לפורמט וואטסאפ
     if raw_caller and not raw_caller.startswith('whatsapp:'):
         caller = f"whatsapp:{raw_caller}"
     else:
         caller = raw_caller
-    # ------------------------------------------------------------
 
     if status in ['no-answer', 'busy', 'failed', 'canceled'] or request.values.get('CallStatus') == 'ringing':
+        
         if caller in Config.VIP_NUMBERS: return str(VoiceResponse())
         
         now = datetime.datetime.now()
         last = last_auto_replies.get(caller)
-        # Cooldown check (don't spam if they call 5 times in a row)
         if last and (now - last).total_seconds() < (Config.COOL_DOWN_HOURS * 3600):
             return str(VoiceResponse())
             
-        state = Config.FLOW_STATES['START']
-        # Send the "We missed you" message
-        send_menu(caller, "הגעתם למשרד, אנו בשיחה כרגע.\n" + state['message'], state['options'])
-        last_auto_replies[caller] = now
+        try:
+            # 2. שליחת התבנית המאושרת (HX...)
+            twilio_mgr.messages.create(
+                from_=Config.TWILIO_NUMBER,
+                to=caller,
+                content_sid=Config.CONTENT_SID # השימוש ב-SID
+            )
+            logger.info(f"WhatsApp Template sent to {caller}")
+            last_auto_replies[caller] = now
+
+        except Exception as e:
+            logger.error(f"Template Failed: {e}")
+            # 3. גיבוי (Fallback) במקרה של תקלה
+            try:
+                backup_text = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. אנו בשיחה כרגע. איך אפשר לעזור?"
+                twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=caller, body=backup_text)
+            except: pass
         
     return str(VoiceResponse())
 
@@ -248,7 +240,6 @@ def whatsapp():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     
-    # 🕵️ HIDDEN RESET BUTTON (Type "reset")
     if incoming_msg.lower() == "reset":
         if sender in user_sessions: del user_sessions[sender]
         if sender in agent.active_chats: del agent.active_chats[sender]
@@ -274,7 +265,6 @@ def whatsapp():
                 user_sessions[sender] = 'AI_MODE'
                 topic = selected['label']
                 try:
-                    # Inject phone from start
                     start_prompt = f"[System Data - Current User Phone: {sender}] The user selected {topic}. Ask them for their name and a short summary."
                     reply = agent.chat(sender, start_prompt)
                     send_msg(sender, reply)
@@ -316,7 +306,7 @@ def send_menu(to, body, options):
 def send_msg(to, body):
     if twilio_mgr: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=body, to=to)
 
-# --- UPTIME ROBOT KEEPER (Must be OUTSIDE the main block) ---
+# --- UPTIME ENDPOINT (Outside main) ---
 @app.route("/", methods=['GET'])
 def keep_alive():
     return "I am alive!", 200
