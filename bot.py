@@ -14,26 +14,30 @@ from googleapiclient.discovery import build
 import gspread
 from dotenv import load_dotenv
 
-# --- 1. SYSTEM SETUP ---
+# --- 1. הגדרות מערכת ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("LawyerBot")
+logger = logging.getLogger("ButcheryBot")
 app = Flask(__name__)
 
 class Config:
-    BUSINESS_NAME = "Adv. Shimon Hasky"
+    BUSINESS_NAME = "האטליז של אבא" 
+    
+    # הודעת הפתיחה
+    WELCOME_TEXT = "אהלן! 🥩 הגעתם לבוט ההזמנות של האטליז. אפשר להזמין כאן בשר טרי, עופות וכל מה שצריך. מה תרצו להזמין היום?"
+
     CONTENT_SID = "HX28b3beac873cd8dba0852c183b8bf0ea" 
 
     _raw_phone = os.getenv('LAWYER_PHONE', '')
     if _raw_phone and not _raw_phone.startswith('whatsapp:'):
-        LAWYER_PHONE = f"whatsapp:{_raw_phone}"
+        OWNER_PHONE = f"whatsapp:{_raw_phone}"
     else:
-        LAWYER_PHONE = _raw_phone
+        OWNER_PHONE = _raw_phone
 
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     _raw_pass = os.getenv('EMAIL_PASSWORD', '')
     EMAIL_PASSWORD = _raw_pass.replace(" ", "").strip()
-    LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
+    OWNER_EMAIL = os.getenv('LAWYER_EMAIL')
     
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     TWILIO_SID = os.getenv('TWILIO_SID')
@@ -41,36 +45,9 @@ class Config:
     TWILIO_NUMBER = os.getenv('WHATSAPP_NUMBER')
     
     SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
-    CALENDAR_ID = os.getenv('CALENDAR_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
-    VIP_NUMBERS = [LAWYER_PHONE]
+    VIP_NUMBERS = [OWNER_PHONE]
     COOL_DOWN_HOURS = 24
-    
-    FLOW_STATES = {
-        "START": {
-            "message": """שלום, הגעתם למשרד עו"ד שמעון חסקי. ⚖️
-אני העוזר החכם של המשרד.
-
-כדי שנתקדם, תוכל לבחור נושא, או לכתוב לי ישר מה קרה.
-
-1️⃣ גירושין
-2️⃣ משמורת ילדים
-3️⃣ הסכמי ממון
-4️⃣ צוואות וירושות
-5️⃣ תיאום פגישה
-6️⃣ 🤖 התייעצות עם נציג (AI)""",
-            "options": [
-                { "label": "גירושין", "next": "AI_MODE_SUMMARY" },
-                { "label": "משמורת ילדים", "next": "AI_MODE_SUMMARY" },
-                { "label": "הסכמי ממון", "next": "AI_MODE_SUMMARY" },
-                { "label": "צוואות וירושות", "next": "AI_MODE_SUMMARY" },
-                { "label": "תיאום פגישה", "next": "ASK_BOOKING" },
-                { "label": "נציג וירטואלי", "next": "AI_MODE" }
-            ]
-        },
-        "ASK_BOOKING": { "message": "מתי תרצה להיפגש?", "next": "FINISH_BOOKING" },
-        "FINISH_BOOKING": { "message": "פגישה שוריינה למחר ב-10:00.", "action": "book_meeting" }
-    }
 
 def create_credentials():
     if not os.path.exists(Config.SERVICE_ACCOUNT_FILE):
@@ -83,23 +60,30 @@ create_credentials()
 
 twilio_mgr = Client(Config.TWILIO_SID, Config.TWILIO_TOKEN) if Config.TWILIO_SID else None
 
-def send_email_report(name, topic, summary, phone, classification):
+# --- 2. כלים (שמירת הזמנה מורחבת) ---
+
+def send_email_order(name, order_summary, method, address, timing, phone):
     if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
         return "Skipped"
     
-    # נושא אימייל דינמי לפי סיווג
-    if classification == "URGENT":
-        subject_line = f"🚨 דחוף ביותר: {name} - {topic}"
-    elif classification == "EXISTING":
-        subject_line = f"📂 הודעה מלקוח: {name}"
-    else:
-        subject_line = f"✨ ליד חדש: {name} - {topic}"
+    subject_line = f"🥩 הזמנה חדשה ({method}): {name}"
+    
+    body = f"""
+    שם לקוח: {name}
+    טלפון: {phone}
+    סוג: {method}
+    כתובת/פרטים: {address}
+    זמן מבוקש: {timing}
 
+    --- פירוט ההזמנה ---
+    {order_summary}
+    """
+    
     msg = EmailMessage()
     msg['Subject'] = subject_line
     msg['From'] = Config.EMAIL_SENDER
-    msg['To'] = Config.LAWYER_EMAIL
-    msg.set_content(f"סוג פנייה: {classification}\nשם: {name}\nטלפון: {phone}\n\nסיכום:\n{summary}")
+    msg['To'] = Config.OWNER_EMAIL
+    msg.set_content(body)
     
     try:
         with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as smtp:
@@ -109,117 +93,127 @@ def send_email_report(name, topic, summary, phone, classification):
         return "Email Sent"
     except: return "Email Failed"
 
-# --- UPDATED SAVE FUNCTION: HANDLES CLASSIFICATION ---
-def save_case_summary(name: str, topic: str, summary: str, phone: str, classification: str = "NEW_LEAD"):
+# פונקציית השמירה מקבלת עכשיו את כל הפרטים החדשים
+def save_order(name: str, order_details: str, method: str, address: str, timing: str, phone: str):
     """
-    Saves case details.
-    classification options: 'URGENT', 'EXISTING', 'NEW_LEAD'
+    Saves the full butchery order with delivery details.
     """
     try:
         clean_phone = phone.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
 
-        # שמירה בגיליון עם העמודה החדשה
+        # שמירה בגיליון אקסל (הוספנו עמודות)
         if os.path.exists(Config.SERVICE_ACCOUNT_FILE):
             try:
                 gc = gspread.service_account(filename=Config.SERVICE_ACCOUNT_FILE)
                 sheet = gc.open_by_key(Config.SHEET_ID).sheet1
-                sheet.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), classification, name, clean_phone, topic, summary])
+                # עמודות: תאריך | סוג | שם | טלפון | משלוח/איסוף | כתובת | זמן | פירוט
+                sheet.append_row([
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), 
+                    "MEAT_ORDER", 
+                    name, 
+                    clean_phone, 
+                    method, 
+                    address, 
+                    timing, 
+                    order_details
+                ])
             except: pass 
 
-        send_email_report(name, topic, summary, clean_phone, classification)
+        send_email_order(name, order_details, method, address, timing, clean_phone)
         
-        # בניית הודעת וואטסאפ מותאמת אישית לחסקי
-        if twilio_mgr and Config.LAWYER_PHONE:
+        # הודעת וואטסאפ לאבא - ברורה ומסודרת
+        if twilio_mgr and Config.OWNER_PHONE:
             
-            if classification == "URGENT":
-                header = "🚨 *מקרה חירום / דחוף!* 🚨"
-            elif classification == "EXISTING":
-                header = "📂 *הודעה מלקוח קיים*"
-            else:
-                header = "✨ *ליד חדש נכנס!*"
-
-            msg_body = f"""{header}
+            type_icon = "🛵" if "משלוח" in method else "🛍️"
+            
+            msg_body = f"""🥩 *הזמנה חדשה נכנסה!*
 👤 *שם:* {name}
-📌 *נושא:* {topic}
-📝 *סיכום:* {summary}
+📞 *טלפון:* {clean_phone}
 
-👇 *לחץ לחיוג/וואטסאפ:*
+{type_icon} *סוג:* {method}
+📍 *לאן/איפה:* {address}
+⏰ *מתי:* {timing}
+
+🔪 *רשימת קניות:*
+{order_details}
+
+👇 *לסיום ואישור:*
 {wa_link}"""
             
-            twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.LAWYER_PHONE)
+            twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=msg_body, to=Config.OWNER_PHONE)
             
-        return f"SAVED as {classification}. Client: {name}."
+        return f"ORDER SAVED for {name}."
     except Exception as e: return f"Error: {str(e)[:100]}"
 
-def book_meeting(client_name: str, reason: str):
-    try:
-        if not os.path.exists(Config.SERVICE_ACCOUNT_FILE): create_credentials()
-        creds = service_account.Credentials.from_service_account_file(Config.SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar'])
-        calendar = build('calendar', 'v3', credentials=creds)
-        start = (datetime.datetime.now() + datetime.timedelta(days=1)).replace(hour=10, minute=0, second=0).isoformat()
-        end = (datetime.datetime.now() + datetime.timedelta(days=1, hours=1)).replace(hour=10, minute=0, second=0).isoformat()
-        event = {'summary': f"Meeting: {client_name}", 'description': reason, 'start': {'dateTime': start, 'timeZone': 'Asia/Jerusalem'}, 'end': {'dateTime': end, 'timeZone': 'Asia/Jerusalem'}}
-        calendar.events().insert(calendarId=Config.CALENDAR_ID, body=event).execute()
-        return "Success: Meeting booked."
-    except Exception as e: return f"Error: {str(e)}"
-
-# --- 4. AI AGENT (CLASSIFIER MODE) ---
+# --- 3. AI AGENT (SMART BUTCHER) ---
 class GeminiAgent:
     def __init__(self):
         genai.configure(api_key=Config.GOOGLE_API_KEY)
-        self.tools = [save_case_summary, book_meeting]
+        self.tools = [save_order]
         
-        # המוח המשודרג: יודע לסווג ולשלוח התראות שונות
+        # המוח החדש: מנהל שיחה שלמה עד שיש את כל הפרטים
         self.system_instruction = f"""
-        You are "HaskyAI", the office manager for {Config.BUSINESS_NAME}.
+        You are the smart assistant for "{Config.BUSINESS_NAME}" (Butcher Shop).
         Language: HEBREW ONLY.
 
-        **MISSION:**
-        1. Identify User Type.
-        2. Get Name + Story.
-        3. CALL `save_case_summary` with the correct `classification`.
+        **GOAL:**
+        Collect a full order from the client. Do NOT call `save_order` until you have ALL details.
 
-        **CLASSIFICATION RULES (Critical):**
-        * **"URGENT"**: Police, Violence, Kidnapping, "Scared", "Emergency".
-        * **"EXISTING"**: "My file", "Hearing tomorrow", "Hezki knows me", "Sent documents".
-        * **"NEW_LEAD"**: "I want to divorce", "How much?", "Sue someone".
+        **REQUIRED DETAILS TO COLLECT:**
+        1. **Order Items:** (Meat, Chicken, amounts, cuts).
+        2. **Confirmation:** Ask "Is that everything?" ("זה הכל?") before moving on.
+        3. **Method:** Delivery ("משלוח") or Pickup ("איסוף עצמי").
+        4. **Logistics:**
+           - If Delivery -> Ask for **Address**.
+           - If Pickup -> Skip Address (set as "At the shop").
+        5. **Timing:** When do they want it?
+        6. **Name:** Client's name.
 
-        **KNOWLEDGE BASE:**
-        * Lawyer: Adv. Shimon Hasky ("Hezki").
-        * **How to Sue:** Need a lawyer.
-        * **Divorce/Custody/Assets:** We handle it all.
+        **CONVERSATION FLOW (Example):**
+        1. User: "I want 2kg steak."
+        2. You: "Got it. 2kg steak. **Anything else?**"
+        3. User: "No that's it."
+        4. You: "Great. **Delivery or Pickup?**"
+        5. User: "Delivery."
+        6. You: "**Where to** and **what time**?"
+        7. User: "Herzl 15 Netanya, at 5 PM."
+        8. You: "Perfect. **What is your name?**"
+        9. User: "Moshe."
+        10. You: "Thanks Moshe. Sending the order now."
+        -> CALL `save_order(...)`
 
         **TRAINING EXAMPLES:**
 
-        --- Ex 1: Existing Client ---
-        User: "היי זה אבי כהן, תגיד לחזקי ששלחתי את המסמכים."
-        You: "קיבלתי אבי. אני מעדכן את עו\"ד חסקי שהמסמכים נשלחו."
-        (Tool Action: classification="EXISTING")
+        --- Ex 1: Pickup Flow ---
+        User: "תכין לי קילו טחון."
+        You: "בכיף. להוסיף עוד משהו או שזה הכל?"
+        User: "זהו."
+        You: "סבבה. משלוח או איסוף עצמי?"
+        User: "איסוף."
+        You: "מתי תגיע לקחת?"
+        User: "עוד שעה."
+        You: "סגור. על איזה שם?"
+        User: "דוד."
+        You: "תודה דוד, רשמתי."
+        (Tool: save_order("דוד", "1 קילו טחון", "איסוף", "בחנות", "עוד שעה", phone))
 
-        --- Ex 2: New Lead ---
-        User: "איך מתחילים הליך גירושין?"
-        You: "צריך ייעוץ משפטי לבנות אסטרטגיה. עו\"ד חסקי מומחה בזה. מה שמך?"
-        User: "דנה"
-        You: "נעים מאוד דנה. רשמתי את הפרטים."
-        (Tool Action: classification="NEW_LEAD")
-
-        --- Ex 3: URGENT / PANIC ---
-        User: "דחוףףף המשטרה בדרך לפה בעלי השתגע!!"
-        You: "אני מבין שזה חירום! אני מקפיץ הודעה דחופה לעו\"ד חסקי. מה שמך המלא?"
-        User: "רינת לוי"
-        You: "רשמתי רינת. מטופל בדחיפות."
-        (Tool Action: classification="URGENT")
+        --- Ex 2: Delivery Flow ---
+        User: "צריך משלוח של 10 שיפודים וקבב."
+        You: "רשמתי. תרצה עוד משהו?"
+        User: "לא."
+        You: "לאן המשלוח ומתי תרצה אותו?"
+        User: "לרחוב הגפן 3, בשעה 14:00."
+        You: "מעולה. מה השם?"
+        User: "רונית."
+        You: "תודה רונית, המשלוח בדרך לטיפול."
+        (Tool: save_order("רונית", "10 שיפודים, קבב", "משלוח", "הגפן 3", "14:00", phone))
         -------------------------------------------
-
-        **PROTOCOL:**
-        1. **Check:** Did user provide Name? If YES -> Don't ask again.
-        2. **Classify:** Decide if URGENT, EXISTING, or NEW_LEAD.
-        3. **Action:** Call `save_case_summary(name, topic, summary, phone, classification)`.
         
         **RULES:**
-        * Do NOT ask for phone number.
-        * Short answers (1-2 sentences).
+        - Be friendly ("Ahlan", "Sababa").
+        - Don't guess details. ASK for them.
+        - Only save at the very end.
         """
         
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools)
@@ -234,16 +228,16 @@ class GeminiAgent:
         
         try:
             response = self.active_chats[user_id].send_message(context_msg)
+            # אם הבוט החזיר תשובה ריקה, זה אומר שהוא שמר את ההזמנה
             if not response.text:
-                return "הפרטים הועברו בהצלחה לעו\"ד חסקי. נחזור אליך בהקדם."
+                return "ההזמנה נקלטה ונשלחה לאטליז! תודה רבה."
             return response.text
         except Exception as e:
             logger.error(f"AI Error: {e}")
-            return "תודה. רשמתי את ההודעה ואני מעביר אותה לעו\"ד חסקי כעת."
+            return "נקלט. תודה."
 
-# --- 5. LOGIC ---
+# --- 4. LOGIC ---
 agent = GeminiAgent()
-user_sessions = {}
 last_auto_replies = {} 
 
 @app.route("/status", methods=['POST'])
@@ -259,11 +253,9 @@ def status():
         last = last_auto_replies.get(caller)
         if last and (now - last).total_seconds() < (Config.COOL_DOWN_HOURS * 3600): return str(VoiceResponse())
         try:
-            twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=caller, content_sid=Config.CONTENT_SID)
+            twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=caller, body=Config.WELCOME_TEXT)
             last_auto_replies[caller] = now
-        except:
-            try: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=caller, body="שלום, הגעתם למשרד עו\"ד שמעון חסקי. אנו בשיחה כרגע. איך אפשר לעזור?")
-            except: pass
+        except: pass
     return str(VoiceResponse())
 
 @app.route("/whatsapp", methods=['POST'])
@@ -272,61 +264,24 @@ def whatsapp():
     sender = request.values.get('From', '')
     
     if incoming_msg.lower() == "reset":
-        if sender in user_sessions: del user_sessions[sender]
         if sender in agent.active_chats: del agent.active_chats[sender]
-        user_sessions[sender] = 'START'
-        send_menu(sender, "🔄 *System Reset Success.*\n\n" + Config.FLOW_STATES['START']['message'], Config.FLOW_STATES['START']['options'])
+        send_msg(sender, Config.WELCOME_TEXT)
         return str(MessagingResponse())
 
-    if sender not in user_sessions: 
-        user_sessions[sender] = 'START'
-        send_menu(sender, Config.FLOW_STATES['START']['message'], Config.FLOW_STATES['START']['options'])
-        return str(MessagingResponse())
-
-    if incoming_msg.isdigit():
-        idx = int(incoming_msg) - 1
-        options = Config.FLOW_STATES['START']['options']
-        if 0 <= idx < len(options):
-            selected = options[idx]
-            if selected['next'] == 'AI_MODE_SUMMARY':
-                user_sessions[sender] = 'AI_MODE'
-                try:
-                    reply = agent.chat(sender, f"The user selected {selected['label']}. Be professional.")
-                    send_msg(sender, reply)
-                except: send_msg(sender, "במה אוכל לעזור?")
-                return str(MessagingResponse())
-            elif selected['next'] == 'ASK_BOOKING':
-                user_sessions[sender] = 'ASK_BOOKING'
-                send_msg(sender, Config.FLOW_STATES['ASK_BOOKING']['message'])
-                return str(MessagingResponse())
-            elif selected['next'] == 'AI_MODE':
-                user_sessions[sender] = 'AI_MODE'
-                send_msg(sender, "שלום. אני העוזר הדיגיטלי. במה אפשר לעזור?")
-                return str(MessagingResponse())
-
-    if user_sessions[sender] == 'ASK_BOOKING':
-        book_meeting(sender, "Manual Booking")
-        send_msg(sender, Config.FLOW_STATES['FINISH_BOOKING']['message'])
-        user_sessions[sender] = 'START'
-        return str(MessagingResponse())
-
-    reply = agent.chat(sender, incoming_msg)
-    send_msg(sender, reply)
-    return str(MessagingResponse())
-
-def send_menu(to, body, options):
-    if not twilio_mgr: return
     try:
-        rows = [{"id": opt["label"], "title": opt["label"][:24]} for opt in options]
-        payload = {"type": "list", "header": {"type": "text", "text": "תפריט"}, "body": {"text": body}, "action": {"button": "בחירה", "sections": [{"title": "אפשרויות", "rows": rows}]}}
-        twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, to=to, body=body, persistent_action=[json.dumps(payload)])
-    except: send_msg(to, body)
+        reply = agent.chat(sender, incoming_msg)
+        send_msg(sender, reply)
+    except Exception as e:
+        logger.error(f"AI Crash: {e}")
+        send_msg(sender, "משהו השתבש, נסה שוב.")
+        
+    return str(MessagingResponse())
 
 def send_msg(to, body):
     if twilio_mgr: twilio_mgr.messages.create(from_=Config.TWILIO_NUMBER, body=body, to=to)
 
 @app.route("/", methods=['GET'])
-def keep_alive(): return "I am alive!", 200
+def keep_alive(): return "ButcheryBot V2 is Ready!", 200
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
