@@ -44,7 +44,7 @@ class Config:
     TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
     TWILIO_NUMBER = os.getenv('WHATSAPP_NUMBER')
     
-    SHEET_ID = "1_lB_XgnugPu8ZlblgMsyaCHd7GmHvq4NdzKuCguUFDM" 
+    SHEET_ID = os.getenv('SHEET_ID')
     SERVICE_ACCOUNT_FILE = 'credentials.json'
     VIP_NUMBERS = [OWNER_PHONE]
     COOL_DOWN_HOURS = 24
