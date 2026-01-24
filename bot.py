@@ -39,7 +39,7 @@ if GOOGLE_API_KEY:
 twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 
 # ==============================================================================
-#                 ZONE A: THE LAWYER BOT (FULL PROMPT + CONFIRMATION)
+#                 ZONE A: THE LAWYER BOT (FIXED: UNKNOWN LINK + RESET)
 # ==============================================================================
 
 lawyer_sessions = {}
@@ -67,28 +67,45 @@ class LawyerConfig:
         "FINISH_BOOKING": { "message": "העברתי בקשה למזכירות לתיאום פגישה, נחזור אליך בהקדם.", "action": "book_meeting" }
     }
 
-# Tool: Save Case (WhatsApp Only)
-def save_case_summary(name: str, topic: str, summary: str, phone: str, classification: str = "NEW_LEAD"):
+# --- Helper: Auto-Fix Phone Number ---
+def ensure_whatsapp_prefix(phone):
+    if not phone: return None
+    clean = phone.strip()
+    if not clean.startswith("whatsapp:"):
+        return f"whatsapp:{clean}"
+    return clean
+
+# Tool: Save Case (FIXED: Get Real Phone from Request)
+def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown", classification: str = "NEW_LEAD"):
     try:
-        clean_phone = phone.replace("whatsapp:", "").replace("+", "")
+        # FIX: Ignore what the AI says, grab the REAL sender number
+        real_sender = request.values.get('From', '')
+        
+        clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
         
         header = "🚨 *חירום!*" if classification == "URGENT" else "✨ *ליד חדש*"
         body = f"""{header}\n👤 {name}\n📌 {topic}\n📝 {summary}\n{wa_link}"""
         
-        if twilio_mgr and LawyerConfig.LAWYER_PHONE:
-            twilio_mgr.messages.create(from_=request.values.get('To'), body=body, to=LawyerConfig.LAWYER_PHONE)
+        # Send to Lawyer (with auto-fix for his number)
+        target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+        
+        if twilio_mgr and target_phone:
+            twilio_mgr.messages.create(from_=request.values.get('To'), body=body, to=target_phone)
+            return f"SAVED as {classification}."
+        else:
+            return f"SAVED as {classification} (Note: Lawyer phone not configured)."
             
-        return f"SAVED as {classification}."
     except Exception as e: return f"Error: {e}"
 
-# Tool: Book Meeting (Simple Alert)
+# Tool: Book Meeting
 def book_meeting_tool(client_name: str, reason: str):
-    if twilio_mgr and LawyerConfig.LAWYER_PHONE:
+    target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+    if twilio_mgr and target_phone:
          twilio_mgr.messages.create(
              from_=request.values.get('To'),
              body=f"📅 *בקשה לפגישה*\nלקוח: {client_name}\nסיבה: {reason}",
-             to=LawyerConfig.LAWYER_PHONE
+             to=target_phone
          )
     return "Success"
 
@@ -96,7 +113,6 @@ class LawyerAgent:
     def __init__(self):
         self.tools = [save_case_summary, book_meeting_tool]
         
-        # הדבקתי כאן את הטקסט המלא שלך, והוספתי רק את שלב 4.5 (אישור)
         self.system_instruction = f"""
         אתה עוזר הקבלה של {LawyerConfig.BUSINESS_NAME}.
 
@@ -236,10 +252,10 @@ lawyer_ai = LawyerAgent()
 def handle_lawyer_flow(sender, incoming_msg, bot_number):
     if incoming_msg.lower() == "reset":
         lawyer_sessions[sender] = 'START'
-        # --- FIX: CLEAR AI MEMORY ON RESET ---
+        # --- FIX 2: CLEAR AI MEMORY ON RESET ---
         if sender in lawyer_ai.chats:
             del lawyer_ai.chats[sender]
-        # -------------------------------------
+        # ---------------------------------------
         return send_lawyer_menu(sender, "🔄 *System Reset*", LawyerConfig.FLOW_STATES['START']['options'], bot_number)
 
     if sender not in lawyer_sessions:
@@ -295,6 +311,9 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         
+        # Auto-fix phone for Supabase business owner too
+        owner_phone = ensure_whatsapp_prefix(owner_phone)
+
         if twilio_mgr and owner_phone:
              twilio_mgr.messages.create(
                  from_=bot_number,
