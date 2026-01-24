@@ -2,16 +2,11 @@ import os
 import json
 import datetime
 import logging
-import smtplib
-from email.message import EmailMessage
 from flask import Flask, request, g
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 import google.generativeai as genai
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-import gspread
 from dotenv import load_dotenv
 from supabase import create_client, Client as SupabaseClient
 
@@ -25,7 +20,7 @@ app = Flask(__name__)
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 TWILIO_SID = os.getenv('TWILIO_SID')
 TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
-LAWYER_NUMBER_ENV = os.getenv('LAWYER_WHATSAPP_NUMBER') # המספר של העורך דין (לזיהוי)
+LAWYER_NUMBER_ENV = os.getenv('LAWYER_WHATSAPP_NUMBER') 
 
 # Supabase Setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -44,28 +39,18 @@ if GOOGLE_API_KEY:
 twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 
 # ==============================================================================
-#                 ZONE A: THE LAWYER BOT (LEGACY CODE)
+#                 ZONE A: THE LAWYER BOT (CLEAN & SMART VERSION)
 # ==============================================================================
 
-# Lawyer Specific Globals
 lawyer_sessions = {}
-last_auto_replies = {} # זיכרון לשיחות שלא נענו (מונע ספאם)
-SERVICE_ACCOUNT_FILE = 'credentials.json'
+last_auto_replies = {} 
 
-# Lawyer Config Class
 class LawyerConfig:
     BUSINESS_NAME = "Adv. Shimon Hasky"
-    SHEET_ID = "1GuXkaBAUfswXwA1uwytrouqhepOASyW35h4GVaC5bQ0" 
-    CALENDAR_ID = os.getenv('CALENDAR_ID')
-    EMAIL_SENDER = os.getenv('EMAIL_SENDER')
-    EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', '').replace(" ", "").strip()
-    LAWYER_EMAIL = os.getenv('LAWYER_EMAIL')
-    LAWYER_PHONE = os.getenv('LAWYER_PHONE')
-    CONTENT_SID = "HX28b3beac873cd8dba0852c183b8bf0ea"
+    LAWYER_PHONE = os.getenv('LAWYER_PHONE') # הטלפון של חזקי לקבלת סיכומים
     VIP_NUMBERS = [LAWYER_PHONE]
     COOL_DOWN_HOURS = 24
     
-    # Lawyer Menu Flow
     FLOW_STATES = {
         "START": {
             "message": """שלום, הגעתם למשרד עו"ד שמעון חסקי. ⚖️\nאני העוזר החכם של המשרד.\nכדי שנתקדם, תוכל לבחור נושא, או לכתוב לי ישר מה קרה.\n1️⃣ גירושין\n2️⃣ משמורת ילדים\n3️⃣ הסכמי ממון\n4️⃣ צוואות וירושות\n5️⃣ תיאום פגישה\n6️⃣ 🤖 התייעצות עם נציג (AI)""",
@@ -79,88 +64,41 @@ class LawyerConfig:
             ]
         },
         "ASK_BOOKING": { "message": "מתי תרצה להיפגש?", "next": "FINISH_BOOKING" },
-        "FINISH_BOOKING": { "message": "פגישה שוריינה למחר ב-10:00.", "action": "book_meeting" }
+        "FINISH_BOOKING": { "message": "העברתי בקשה למזכירות לתיאום פגישה, נחזור אליך בהקדם.", "action": "book_meeting" }
     }
 
-# Helper: Create Credentials File
-def create_credentials():
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        json_content = os.getenv('GOOGLE_CREDENTIALS_JSON')
-        if json_content:
-            with open(SERVICE_ACCOUNT_FILE, 'w') as f:
-                f.write(json_content)
-
-# Helper: Google Services
-def get_google_services():
-    create_credentials()
-    try:
-        if os.path.exists(SERVICE_ACCOUNT_FILE):
-            gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
-            sheet = gc.open_by_key(LawyerConfig.SHEET_ID).sheet1
-            
-            cal_scopes = ['https://www.googleapis.com/auth/calendar']
-            creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=cal_scopes)
-            calendar = build('calendar', 'v3', credentials=creds)
-            return sheet, calendar
-    except Exception as e:
-        logger.error(f"Google Service Error: {e}")
-    return None, None
-
-# Tool: Save Case
+# Tool: Save Case (WhatsApp Only)
 def save_case_summary(name: str, topic: str, summary: str, phone: str, classification: str = "NEW_LEAD"):
     try:
-        sheet, _ = get_google_services()
         clean_phone = phone.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
         
-        # Save to Sheet
-        if sheet:
-            row = [datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), classification, name, clean_phone, topic, summary]
-            sheet.append_row(row)
-
-        # Send Email
-        if LawyerConfig.EMAIL_SENDER and LawyerConfig.EMAIL_PASSWORD:
-            msg = EmailMessage()
-            msg['Subject'] = f"✨ ליד חדש: {name} - {topic} ({classification})"
-            msg['From'] = LawyerConfig.EMAIL_SENDER
-            msg['To'] = LawyerConfig.LAWYER_EMAIL
-            msg.set_content(f"סוג: {classification}\nשם: {name}\nטלפון: {phone}\nסיכום:\n{summary}")
-            with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
-                smtp.ehlo(); smtp.starttls(); smtp.ehlo()
-                smtp.login(LawyerConfig.EMAIL_SENDER, LawyerConfig.EMAIL_PASSWORD)
-                smtp.send_message(msg)
-
-        # Notify Lawyer via WhatsApp
+        # בניית הודעה לחזקי
+        header = "🚨 *חירום!*" if classification == "URGENT" else "✨ *ליד חדש*"
+        body = f"""{header}\n👤 {name}\n📌 {topic}\n📝 {summary}\n{wa_link}"""
+        
+        # שליחה לחזקי
         if twilio_mgr and LawyerConfig.LAWYER_PHONE:
-            header = "🚨 *חירום!*" if classification == "URGENT" else "✨ *ליד חדש*"
-            body = f"""{header}\n👤 {name}\n📌 {topic}\n📝 {summary}\n{wa_link}"""
             twilio_mgr.messages.create(from_=request.values.get('To'), body=body, to=LawyerConfig.LAWYER_PHONE)
             
         return f"SAVED as {classification}."
     except Exception as e: return f"Error: {e}"
 
-# Tool: Book Meeting
+# Tool: Book Meeting (Simple Alert)
 def book_meeting_tool(client_name: str, reason: str):
-    try:
-        _, calendar = get_google_services()
-        if not calendar: return "Error: Calendar not connected."
-        start = (datetime.datetime.now() + datetime.timedelta(days=1)).replace(hour=10, minute=0).isoformat()
-        end = (datetime.datetime.now() + datetime.timedelta(days=1, hours=1)).replace(hour=10, minute=0).isoformat()
-        event = {
-            'summary': f"Meeting: {client_name}",
-            'description': reason,
-            'start': {'dateTime': start, 'timeZone': 'Asia/Jerusalem'},
-            'end': {'dateTime': end, 'timeZone': 'Asia/Jerusalem'}
-        }
-        calendar.events().insert(calendarId=LawyerConfig.CALENDAR_ID, body=event).execute()
-        return "Success: Meeting booked for tomorrow 10:00."
-    except Exception as e: return f"Booking Error: {e}"
+    if twilio_mgr and LawyerConfig.LAWYER_PHONE:
+         twilio_mgr.messages.create(
+             from_=request.values.get('To'),
+             body=f"📅 *בקשה לפגישה*\nלקוח: {client_name}\nסיבה: {reason}",
+             to=LawyerConfig.LAWYER_PHONE
+         )
+    return "Success"
 
-# Lawyer AI Agent - (YOUR EXACT VERSION)
 class LawyerAgent:
     def __init__(self):
         self.tools = [save_case_summary, book_meeting_tool]
         
+        # --- THE ORIGINAL "FLOODED" PROMPT + NEW CONFIRMATION LOGIC ---
         self.system_instruction = f"""
         אתה עוזר הקבלה של {LawyerConfig.BUSINESS_NAME}.
 
@@ -171,8 +109,9 @@ class LawyerAgent:
         **המטרה שלך (לפי סדר עדיפויות):**
         1. אם הלקוח שאל שאלה - ענה קצר וישיר (1-2 משפטים).
         2. קבל שם מלא של הלקוח.
-        3. הבן את הבעיה המשפטית.
-        4. סווג ושמור את התיק.
+        3. הבן את הבעיה המשפטית לעומק.
+        4. קבל אישור מהלקוח על הסיכום.
+        5. סווג ושמור את התיק.
 
         **תהליך השיחה - עקוב בדיוק:**
 
@@ -180,134 +119,39 @@ class LawyerAgent:
         אם הלקוח מביע כאב/מצוקה/פחד, התחל עם:
         - "מצטער/ת לשמוע, אני כאן לעזור."
         - "זה נשמע קשה, בואי נראה איך אפשר לקדם."
-        - אל תזלזל ברגשות. אל תמהר.
 
         📍 **שלב 2: תשובה לשאלה (אם יש)**
         אם הלקוח שאל שאלה כללית:
-        - "כמה עולה גירושין?" → "המחיר משתנה בהתאם למורכבות התיק (ילדים, רכוש). עו\"ד חסקי ייתן הערכה מדויקת בפגישה."
-        - "מה זה הסכם ממון?" → "הסכם שקובע חלוקת רכוש במקרה של פרידה. נעשה לפני או אחרי נישואין."
-        - "איך מתחילים תהליך משמורת?" → "צריך להגיש תביעה לבית משפט. עו\"ד חסקי ירכז את כל המסמכים."
+        - "כמה עולה גירושין?" → "המחיר משתנה בהתאם למורכבות התיק. עו\"ד חסקי ייתן הערכה מדויקת בפגישה."
         כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים.
 
         📍 **שלב 3: קבלת שם**
         אם אין לך שם עדיין:
         - "מה שמך?" (פשוט וישיר)
-        - אל תאמר "שם מלא" - תגיד רק "שם"
-        - אם הם נתנו רק שם פרטי, תגיד: "ושם משפחה?"
 
-        📍 **שלב 4: הבנת הבעיה**
-        שאל שאלה אחת ממוקדת:
-        - גירושין: "יש ילדים מתחת לגיל 18?"
-        - משמורת: "הילדים איתך או עם הצד השני?"
-        - ירושה: "יש צוואה כתובה?"
-        - תאונה: "מתי זה קרה?"
-        אל תשאל יותר משאלה אחת. תן ללקוח לספר.
+        📍 **שלב 4: הבנת הבעיה (חובה!)**
+        שאל שאלות ממוקדות עד שתבין את המקרה.
+        ⛔ **אסור לקבל תשובות ריקות!** אם הלקוח אומר "אני רוצה להתגרש", תשאל: "יש ילדים? יש רכוש משותף? ספר לי בקצרה על הרקע."
 
-        📍 **שלב 5: סיווג ושמירה**
-        ברגע שיש לך: שם + תיאור הבעיה → קרא לפונקציה `save_case_summary`.
+        📍 **שלב 5: אישור הלקוח (התוספת החדשה והחשובה!)**
+        לפני שאתה שומר, אתה חייב לסכם ללקוח את מה שהבנת ולשאול אם זה נכון.
+        תגיד: "אז אני מבין ש[תקציר המקרה]. האם תרצה להוסיף עוד פרטים לסיכום לפני שאני מעביר לחזקי, או שזה מספיק?"
+        
+        * אם הלקוח מוסיף פרטים -> עדכן את הסיכום ושאל שוב.
+        * רק כשהלקוח אומר "זה מספיק" / "כן" / "שלח" -> עבור לשלב 6.
+
+        📍 **שלב 6: סיווג ושמירה**
+        קרא לפונקציה `save_case_summary`.
 
         **חוקי סיווג (CLASSIFICATION):**
+        🔥 **"URGENT"**: משטרה, אלימות, פחד, "דחוף".
+        📁 **"EXISTING"**: לקוח קיים, "התיק שלי", "דיון מחר".
+        ✨ **"NEW_LEAD"**: מתעניין חדש, "כמה עולה?", "רוצה להתגרש".
 
-        🔥 **"URGENT"** - השתמש כשיש:
-        - מילות חירום: "דחוף", "משטרה", "אלימות", "חטיפה", "מפחד/ת", "עכשיו"
-        - סימני פניקה: "!!!", אותיות גדולות, "עזרה"
-        - סכנה פיזית או נפשית מיידית
-        דוגמה: "בעלי איים עליי עם סכין!!!"
-
-        📁 **"EXISTING"** - השתמש כשיש:
-        - "התיק שלי", "הדיון שלי", "שלחתי מסמכים", "חזקי יודע עליי"
-        - "הפגישה מחר", "המשך התיק"
-        - כל אזכור של קשר קיים עם המשרד
-        דוגמה: "היי זה משה כהן, תגיד לחזקי שהכל מוכן לדיון מחר"
-
-        ✨ **"NEW_LEAD"** - השתמש כשיש:
-        - "רוצה להתגרש", "צריך עורך דין", "איך מתחילים הליך"
-        - "כמה זה עולה?", "אפשר לקבוע פגישה?"
-        - כל פנייה ראשונה למשרד
-        דוגמה: "שלום, אני רוצה לתבוע את המעסיק שלי"
-
-        **דוגמאות אימון מלאות:**
-
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        דוגמה 1: לקוח קיים
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        לקוח: "היי זה אבי כהן, תגיד לחזקי ששלחתי את המסמכים לדיון."
-        אתה: "הי אבי, קיבלתי! אני מעדכן את עו\"ד חסקי עכשיו."
-        (Tool Action: classification="EXISTING")
-
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        דוגמה 2: ליד חדש עם שאלה
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        לקוח: "כמה זמן לוקח תהליך גירושין?"
-        אתה: "בממוצע 6-18 חודשים, תלוי אם יש הסכמה או מחלוקות. עו\"ד חסקי יכול להעריך לפי המקרה שלך. מה שמך?"
-        לקוח: "דנה לוי"
-        אתה: "נעים מאוד דנה. יש ילדים?"
-        לקוח: "כן, שניים"
-        אתה: "הבנתי. רשמתי את הפרטים והעברתי לעו\"ד חסקי."
-        (Tool Action: classification="NEW_LEAD")
-
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        דוגמה 3: מצב חירום
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        לקוח: "דחוףףף בעלי השתגע ושבר את הבית המשטרה בדרך!!!"
-        אתה: "אני רואה שזה חירום. אני שולח הודעה דחופה לעו\"ד חסקי עכשיו. מה שמך המלא?"
-        לקוח: "רינת לוי"
-        אתה: "רינת, הפרטים הועברו בדחיפות. עו\"ד חסקי יחזור אליך בהקדם האפשרי." 
-        (Tool Action: classification="URGENT")
-
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        דוגמה 4: שאלה כללית בלי סיפור
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        לקוח: "מה זה הסכם ממון?"
-        אתה: "הסכם שקובע איך מחלקים רכוש במקרה של פרידה. אפשר לעשות לפני או אחרי נישואין. רוצה לשמוע עוד?"
-        לקוח: "כן, איך עושים את זה?"
-        אתה: "עו\"ד חסקי עושה את זה כל הזמן, זה לוקח פגישה אחת. מה שמך?"
-        לקוח: "יוסי"
-        אתה: "ושם משפחה?"
-        לקוח: "אברהם"
-        אתה: "מעולה יוסי. רשמתי ועו\"ד חסקי יחזור אליך."
-        (Tool Action: classification="NEW_LEAD")
-
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        דוגמה 5: התחלה רגשית
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        לקוח: "אני לא יודעת מה לעשות, הבעל שלי רוצה לקחת את הילדים"
-        אתה: "מצטער לשמוע שאת עוברת את זה. בואי נראה איך אפשר לעזור. מה שמך?"
-        לקוח: "מיכל גולן"
-        אתה: "מיכל, הילדים איתך עכשיו?"
-        לקוח: "כן, אבל הוא מאיים"
-        אתה: "הבנתי. העברתי את הפרטים לעו\"ד חסקי בדחיפות. הוא יחזור אליך בהקדם."
-        (Tool Action: classification="URGENT")
-
-        **כללי זהב - קרא לפני כל תשובה:**
-
-        ✅ **תמיד עשה:**
-        - דבר בעברית פשוטה וברורה
-        - אם לקוח רגשי - האט, הקשב, תמוך
-        - שאל שאלה אחת בכל פעם
-        - אם יש שאלה - ענה קודם
-        - אחרי שיש שם + בעיה - שמור מיד
-
-        ❌ **לעולם אל תעשה:**
-        - לא לכתוב קוד Python
-        - לא לשאול מספר טלפון (כבר יש לך)
-        - לא לכתוב משפטים ארוכים (מקסימום 2 משפטים)
-        - לא להשתמש במילים כמו "בבקשה עקוב אחרי השלבים" - זה רובוטי
-        - לא לחזור על מידע שהלקוח כבר אמר
-        - לא לדבר באנגלית (גם אם הלקוח כותב באנגלית, תענה בעברית)
-        - **לא לתת מחירים:** אם שואלים על מחיר, תגיד שזה תלוי במקרה וייקבע בפגישה.
-        - **לא להבטיח זמנים:** אל תגיד "הוא יתקשר בעוד 5 דקות" או "היום". תגיד "בהקדם".
-
-        **מבנה תשובה אידיאלי:**
-        משפט 1: אמפתיה/תשובה
-        משפט 2: שאלה ממוקדת
-        סה"כ: 10-25 מילים.
-
-        **טיפול בשגיאות:**
-        אם הפונקציה החזירה "Saved to Database" - תגיד:
-        "הפרטים נשמרו והועברו לעו\"ד חסקי."
-
-        זכור: אתה לא עורך דין. אתה מזכיר חכם שמסנן, מסווג, ומעביר לעו"ד.
+        **כללי ברזל:**
+        ❌ **אל תבטיח זמנים:** אמור "בהקדם האפשרי".
+        ❌ **אל תיתן מחירים.**
+        ❌ **אל תשמור סיכום ריק:** תמיד תשאל שאלות הבהרה אם הלקוח לא פירט.
         """
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.chats = {}
@@ -322,19 +166,15 @@ class LawyerAgent:
 
 lawyer_ai = LawyerAgent()
 
-# --- THE LAWYER FLOW HANDLER ---
 def handle_lawyer_flow(sender, incoming_msg, bot_number):
-    # 1. Reset
     if incoming_msg.lower() == "reset":
         lawyer_sessions[sender] = 'START'
         return send_lawyer_menu(sender, "🔄 *System Reset*", LawyerConfig.FLOW_STATES['START']['options'], bot_number)
 
-    # 2. New User
     if sender not in lawyer_sessions:
         lawyer_sessions[sender] = 'START'
         return send_lawyer_menu(sender, LawyerConfig.FLOW_STATES['START']['message'], LawyerConfig.FLOW_STATES['START']['options'], bot_number)
 
-    # 3. Handle Menu Selection (Digits)
     if incoming_msg.isdigit() and lawyer_sessions[sender] == 'START':
         idx = int(incoming_msg) - 1
         options = LawyerConfig.FLOW_STATES['START']['options']
@@ -351,13 +191,11 @@ def handle_lawyer_flow(sender, incoming_msg, bot_number):
                 lawyer_sessions[sender] = 'AI_MODE'
                 return send_lawyer_msg(sender, "היי, אני כאן. איך אפשר לעזור?", bot_number)
 
-    # 4. Handle Booking Flow
     if lawyer_sessions[sender] == 'ASK_BOOKING':
         book_meeting_tool(sender, "Manual Booking")
         lawyer_sessions[sender] = 'START'
         return send_lawyer_msg(sender, LawyerConfig.FLOW_STATES['FINISH_BOOKING']['message'], bot_number)
 
-    # 5. AI Chat
     reply = lawyer_ai.chat(sender, incoming_msg)
     return send_lawyer_msg(sender, reply, bot_number)
 
@@ -376,15 +214,13 @@ def send_lawyer_menu(to, body, options, from_):
     return str(MessagingResponse())
 
 # ==============================================================================
-#                 ZONE B: THE NEW SUPABASE BOT (BUTCHER & OTHERS)
+#                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS)
 # ==============================================================================
 
 def save_order_supabase(name: str, order_details: str, method: str, address: str, timing: str, phone: str):
-    """Save order from Supabase Bot"""
     try:
         current_business = getattr(g, 'business_config', None)
         if not current_business: return "Error: No business context."
-        
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         
@@ -424,18 +260,15 @@ def get_business_from_supabase(bot_number):
 
 def handle_supabase_flow(sender, msg, bot_number):
     business = get_business_from_supabase(bot_number)
-    if not business:
-        return str(MessagingResponse()) 
-
+    if not business: return str(MessagingResponse()) 
     g.business_config = business
     reply = supabase_agent.get_response(sender, msg, business)
-    
     resp = MessagingResponse()
     resp.message(reply)
     return str(resp)
 
 # ==============================================================================
-#                 MAIN ROUTER (THE SWITCH)
+#                 MAIN ROUTER
 # ==============================================================================
 
 @app.route("/whatsapp", methods=['POST'])
@@ -443,7 +276,6 @@ def main_router():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
-
     clean_bot_num = bot_number.replace("whatsapp:", "").strip()
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
 
@@ -453,34 +285,25 @@ def main_router():
         return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
-#                 ZONE C: VOICE CALL HANDLER (CATCH & TEXT)
+#                 ZONE C: INCOMING CALL (REJECT & WHATSAPP)
 # ==============================================================================
 
 @app.route("/incoming", methods=['POST'])
 def incoming_voice():
-    """
-    כאן מגיעה שיחה **רק** אם בעל העסק עשה 'עקוב אחרי באין מענה'.
-    הפעולה: זיהוי עסק -> שליחת וואטסאפ -> ניתוק מיידי.
-    """
     caller = request.values.get('From', '') 
     bot_number = request.values.get('To', '')
-    
-    # ניקוי מספרים (קריטי להשוואות)
     clean_caller = caller.replace("whatsapp:", "")
     clean_bot = bot_number.replace("whatsapp:", "")
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
-
     message_body = None
 
-    # 1. זיהוי אם זה עבור העורך דין
+    # 1. Lawyer Logic
     if clean_bot == clean_lawyer_env:
-        # בדיקת VIP: אם העורך דין בודק את עצמו - רק ננתק בלי לשלוח הודעה
         if clean_caller in LawyerConfig.VIP_NUMBERS:
             resp = VoiceResponse()
             resp.reject()
             return str(resp)
         
-        # בדיקת COOL DOWN: לא להציק ללקוח שכבר קיבל הודעה ב-24 שעות האחרונות
         now = datetime.datetime.now()
         last = last_auto_replies.get(clean_caller)
         if last and (now - last).total_seconds() < (LawyerConfig.COOL_DOWN_HOURS * 3600):
@@ -488,36 +311,29 @@ def incoming_voice():
             resp.reject()
             return str(resp)
 
-        # תוכן ההודעה לעורך דין
         message_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. איננו זמינים כרגע לשיחה, אך נשמח לעזור כאן בוואטסאפ! אנא רשמו לנו במה מדובר."
         last_auto_replies[clean_caller] = now
 
-    # 2. זיהוי אם זה עבור האטליז (או כל עסק אחר ב-Supabase)
+    # 2. Supabase Logic (Butcher etc.)
     else:
         business = get_business_from_supabase(clean_bot)
         if business:
             biz_name = business.get('business_name', 'העסק')
-            # תוכן ההודעה לאטליז/עסקים אחרים
             message_body = f"שלום, הגעתם ל{biz_name}. אנחנו לא פנויים לשיחה כרגע, אבל זמינים להזמנות כאן בוואטסאפ!"
 
-    # 3. שליחת הוואטסאפ (אם זוהה עסק)
+    # 3. Send WhatsApp
     if message_body:
         try:
-            # הוספת whatsapp: לשני הצדדים כדי שטוויליו ישלח הודעה ירוקה
-            final_from = f"whatsapp:{clean_bot}"
-            final_to = f"whatsapp:{clean_caller}"
-            
             twilio_mgr.messages.create(
-                from_=final_from,
-                to=final_to,
+                from_=f"whatsapp:{clean_bot}",
+                to=f"whatsapp:{clean_caller}",
                 body=message_body
             )
             logger.info(f"Missed call handled. WhatsApp sent to {clean_caller}")
         except Exception as e:
             logger.error(f"Error sending WhatsApp: {e}")
 
-    # 4. ניתוק השיחה מיד
-    # הפקודה <Reject /> גורמת לשיחה להתנתק מיד. הלקוח ישמע צליל תפוס קצר.
+    # 4. Reject Call
     resp = VoiceResponse()
     resp.reject()
     return str(resp)
