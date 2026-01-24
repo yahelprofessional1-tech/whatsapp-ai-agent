@@ -453,80 +453,74 @@ def main_router():
         return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
-#                 ZONE C: VOICE CALL HANDLER (FORWARDING + CATCHER)
+#                 ZONE C: VOICE CALL HANDLER (CATCH & TEXT)
 # ==============================================================================
 
 @app.route("/incoming", methods=['POST'])
 def incoming_voice():
     """
-    כאשר שיחה נכנסת: הבוט מעביר אותה (Forward) לטלפון האמיתי.
+    כאן מגיעה שיחה **רק** אם בעל העסק עשה 'עקוב אחרי באין מענה'.
+    הפעולה: זיהוי עסק -> שליחת וואטסאפ -> ניתוק מיידי.
     """
-    resp = VoiceResponse()
-    
-    # 1. זיהוי לאן השיחה הגיעה (עו"ד או אטליז)
+    caller = request.values.get('From', '') 
     bot_number = request.values.get('To', '')
+    
+    # ניקוי מספרים (קריטי להשוואות)
+    clean_caller = caller.replace("whatsapp:", "")
     clean_bot = bot_number.replace("whatsapp:", "")
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
-    
-    target_phone = None
 
+    message_body = None
+
+    # 1. זיהוי אם זה עבור העורך דין
     if clean_bot == clean_lawyer_env:
-        target_phone = LawyerConfig.LAWYER_PHONE
+        # בדיקת VIP: אם העורך דין בודק את עצמו - רק ננתק בלי לשלוח הודעה
+        if clean_caller in LawyerConfig.VIP_NUMBERS:
+            resp = VoiceResponse()
+            resp.reject()
+            return str(resp)
+        
+        # בדיקת COOL DOWN: לא להציק ללקוח שכבר קיבל הודעה ב-24 שעות האחרונות
+        now = datetime.datetime.now()
+        last = last_auto_replies.get(clean_caller)
+        if last and (now - last).total_seconds() < (LawyerConfig.COOL_DOWN_HOURS * 3600):
+            resp = VoiceResponse()
+            resp.reject()
+            return str(resp)
+
+        # תוכן ההודעה לעורך דין
+        message_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. איננו זמינים כרגע לשיחה, אך נשמח לעזור כאן בוואטסאפ! אנא רשמו לנו במה מדובר."
+        last_auto_replies[clean_caller] = now
+
+    # 2. זיהוי אם זה עבור האטליז (או כל עסק אחר ב-Supabase)
     else:
         business = get_business_from_supabase(clean_bot)
         if business:
-            target_phone = business.get('owner_phone')
+            biz_name = business.get('business_name', 'העסק')
+            # תוכן ההודעה לאטליז/עסקים אחרים
+            message_body = f"שלום, הגעתם ל{biz_name}. אנחנו לא פנויים לשיחה כרגע, אבל זמינים להזמנות כאן בוואטסאפ!"
 
-    # 2. ביצוע הפניה (Forwarding)
-    if target_phone:
-        # מחייג לבעל העסק. אם לא עונים תוך 20 שניות -> לך ל-/call_ended
-        dial = resp.dial(timeout=20, action='/call_ended')
-        dial.number(target_phone)
-    else:
-        resp.say("Business number not configured.")
-    
+    # 3. שליחת הוואטסאפ (אם זוהה עסק)
+    if message_body:
+        try:
+            # הוספת whatsapp: לשני הצדדים כדי שטוויליו ישלח הודעה ירוקה
+            final_from = f"whatsapp:{clean_bot}"
+            final_to = f"whatsapp:{clean_caller}"
+            
+            twilio_mgr.messages.create(
+                from_=final_from,
+                to=final_to,
+                body=message_body
+            )
+            logger.info(f"Missed call handled. WhatsApp sent to {clean_caller}")
+        except Exception as e:
+            logger.error(f"Error sending WhatsApp: {e}")
+
+    # 4. ניתוק השיחה מיד
+    # הפקודה <Reject /> גורמת לשיחה להתנתק מיד. הלקוח ישמע צליל תפוס קצר.
+    resp = VoiceResponse()
+    resp.reject()
     return str(resp)
-
-@app.route("/call_ended", methods=['POST'])
-def call_ended_handler():
-    """
-    נקרא רק אחרי שהחיוג הסתיים. בודק אם ענו. אם לא - שולח וואטסאפ.
-    """
-    dial_status = request.values.get('DialCallStatus', '')
-    caller = request.values.get('From', '') # הלקוח
-    bot_number = request.values.get('To', '') # המספר העסקי
-
-    # סטטוסים שנחשבים "לא ענו" (Busy, No-answer, Failed, Canceled)
-    if dial_status in ['busy', 'no-answer', 'failed', 'canceled']:
-        
-        clean_bot = bot_number.replace("whatsapp:", "")
-        clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
-        msg_body = None
-
-        if clean_bot == clean_lawyer_env:
-            # עורך דין (בדיקת VIP)
-            if caller not in LawyerConfig.VIP_NUMBERS:
-                 msg_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. לא יכולנו לענות לשיחה כרגע, אבל אנחנו זמינים כאן! כתבו לנו הודעה ונחזור בהקדם."
-        else:
-            # אטליז / עסק אחר
-            business = get_business_from_supabase(clean_bot)
-            if business:
-                name = business.get('business_name', 'העסק')
-                msg_body = f"שלום, הגעתם ל{name}. אנחנו לא זמינים כרגע לשיחה, אבל אפשר לבצע הזמנות כאן בוואטסאפ!"
-
-        # שליחת הודעת WhatsApp
-        if msg_body:
-            try:
-                # הוספת whatsapp: לשני הצדדים לשליחה תקינה
-                final_from = f"whatsapp:{clean_bot.replace('whatsapp:', '')}"
-                final_to = f"whatsapp:{caller.replace('whatsapp:', '')}"
-                
-                twilio_mgr.messages.create(from_=final_from, to=final_to, body=msg_body)
-                logger.info(f"Missed call detected ({dial_status}). WhatsApp sent to {caller}.")
-            except Exception as e:
-                logger.error(f"Failed to send miss-call WhatsApp: {e}")
-
-    return str(VoiceResponse())
 
 @app.route("/", methods=['GET'])
 def health_check():
