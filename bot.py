@@ -46,17 +46,16 @@ twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 # ==============================================================================
 #                 ZONE A: THE LAWYER BOT (LEGACY CODE)
 # ==============================================================================
-# This section contains the exact logic you provided, wrapped in a function.
 
 # Lawyer Specific Globals
 lawyer_sessions = {}
-last_auto_replies = {}
+last_auto_replies = {} # זיכרון לשיחות שלא נענו (מונע ספאם)
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 
 # Lawyer Config Class
 class LawyerConfig:
     BUSINESS_NAME = "Adv. Shimon Hasky"
-    SHEET_ID = "1GuXkaBAUfswXwA1uwytrouqhepOASyW35h4GVaC5bQ0" # Your Sheet ID
+    SHEET_ID = "1GuXkaBAUfswXwA1uwytrouqhepOASyW35h4GVaC5bQ0" 
     CALENDAR_ID = os.getenv('CALENDAR_ID')
     EMAIL_SENDER = os.getenv('EMAIL_SENDER')
     EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', '').replace(" ", "").strip()
@@ -157,7 +156,7 @@ def book_meeting_tool(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow 10:00."
     except Exception as e: return f"Booking Error: {e}"
 
-# Lawyer AI Agent - Elite Prompt Engineering (Pricing Removed)
+# Lawyer AI Agent - Elite Prompt Engineering (Corrected Promises)
 class LawyerAgent:
     def __init__(self):
         self.tools = [save_case_summary, book_meeting_tool]
@@ -253,7 +252,7 @@ class LawyerAgent:
         לקוח: "דחוףףף בעלי השתגע ושבר את הבית המשטרה בדרך!!!"
         אתה: "אני רואה שזה חירום. אני שולח הודעה דחופה לעו\"ד חסקי עכשיו. מה שמך המלא?"
         לקוח: "רינת לוי"
-        אתה: "רינת, הפרטים הועברו בדחיפות. עו\"ד חסקי יחזור אליך תוך דקות."
+        אתה: "רינת, הפרטים הועברו בדחיפות. עו\"ד חסקי יחזור אליך בהקדם האפשרי." 
         (Tool Action: classification="URGENT")
 
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -277,7 +276,7 @@ class LawyerAgent:
         לקוח: "מיכל גולן"
         אתה: "מיכל, הילדים איתך עכשיו?"
         לקוח: "כן, אבל הוא מאיים"
-        אתה: "הבנתי. העברתי את הפרטים לעו\"ד חסקי בדחיפות. הוא יחזור אליך היום."
+        אתה: "הבנתי. העברתי את הפרטים לעו\"ד חסקי בדחיפות. הוא יחזור אליך בהקדם."
         (Tool Action: classification="URGENT")
 
         **כללי זהב - קרא לפני כל תשובה:**
@@ -297,6 +296,7 @@ class LawyerAgent:
         - לא לחזור על מידע שהלקוח כבר אמר
         - לא לדבר באנגלית (גם אם הלקוח כותב באנגלית, תענה בעברית)
         - **לא לתת מחירים:** אם שואלים על מחיר, תגיד שזה תלוי במקרה וייקבע בפגישה.
+        - **לא להבטיח זמנים:** אל תגיד "הוא יתקשר בעוד 5 דקות" או "היום". תגיד "בהקדם".
 
         **מבנה תשובה אידיאלי:**
         משפט 1: אמפתיה/תשובה
@@ -366,13 +366,11 @@ def send_lawyer_msg(to, body, from_):
     return str(MessagingResponse())
 
 def send_lawyer_menu(to, body, options, from_):
-    # Sends menu with buttons (List Message)
     try:
         rows = [{"id": opt["label"], "title": opt["label"][:24]} for opt in options]
         payload = {"type": "list", "header": {"type": "text", "text": "תפריט"}, "body": {"text": body}, "action": {"button": "בחירה", "sections": [{"title": "אפשרויות", "rows": rows}]}}
         twilio_mgr.messages.create(from_=from_, to=to, body=body, persistent_action=[json.dumps(payload)])
     except:
-        # Fallback to text if buttons fail
         opts_text = "\n".join([f"{i+1}. {opt['label']}" for i, opt in enumerate(options)])
         twilio_mgr.messages.create(from_=from_, to=to, body=f"{body}\n{opts_text}")
     return str(MessagingResponse())
@@ -387,7 +385,6 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         current_business = getattr(g, 'business_config', None)
         if not current_business: return "Error: No business context."
         
-        # Logic to notify owner via WhatsApp
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         
@@ -426,18 +423,13 @@ def get_business_from_supabase(bot_number):
     return res.data[0] if res.data else None
 
 def handle_supabase_flow(sender, msg, bot_number):
-    # 1. Identify Business
     business = get_business_from_supabase(bot_number)
     if not business:
-        return str(MessagingResponse()) # Ignore unknown numbers
+        return str(MessagingResponse()) 
 
-    # 2. Setup Context
     g.business_config = business
-    
-    # 3. AI Reply
     reply = supabase_agent.get_response(sender, msg, business)
     
-    # 4. Send
     resp = MessagingResponse()
     resp.message(reply)
     return str(resp)
@@ -450,24 +442,72 @@ def handle_supabase_flow(sender, msg, bot_number):
 def main_router():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
-    bot_number = request.values.get('To', '') # The number receiving the message
+    bot_number = request.values.get('To', '') 
 
-    # --- THE CRITICAL CHECK ---
-    # נבדוק אם המספר שאליו נשלחה ההודעה הוא המספר של העורך דין
-    # אנחנו מנקים את הקידומת whatsapp: כדי למנוע טעויות השוואה
     clean_bot_num = bot_number.replace("whatsapp:", "").strip()
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
 
     if clean_bot_num == clean_lawyer_env:
-        # --> GO TO ZONE A (LAWYER)
         return handle_lawyer_flow(sender, incoming_msg, bot_number)
     else:
-        # --> GO TO ZONE B (SUPABASE/BUTCHER)
         return handle_supabase_flow(sender, incoming_msg, bot_number)
+
+# --- 🚨 MISSED CALL CATCHER: WHATSAPP EDITION (Lawyer + Butcher) 🚨 ---
+@app.route("/status", methods=['POST'])
+def status():
+    # 1. קבלת פרטי השיחה
+    caller = request.values.get('From', '') 
+    bot_number = request.values.get('To', '') 
+    call_status = request.values.get('CallStatus', '') 
+
+    # פועלים רק כשהשיחה מסתיימת ללא מענה
+    if call_status not in ['busy', 'no-answer', 'completed']:
+        return str(VoiceResponse())
+
+    # ניקוי מספרים
+    clean_caller = caller.replace("whatsapp:", "")
+    clean_bot = bot_number.replace("whatsapp:", "")
+    clean_lawyer = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+
+    message_body = None
+
+    # --- בדיקה 1: האם זה העורך דין? ---
+    if clean_bot == clean_lawyer:
+        # VIP & Cool Down
+        if clean_caller in LawyerConfig.VIP_NUMBERS: return str(VoiceResponse())
+        
+        now = datetime.datetime.now()
+        last = last_auto_replies.get(clean_caller)
+        if last and (now - last).total_seconds() < (LawyerConfig.COOL_DOWN_HOURS * 3600):
+            return str(VoiceResponse())
+            
+        message_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. אנו בשיחה כרגע. אנא שלחו הודעה כאן בוואטסאפ ונחזור בהקדם."
+        last_auto_replies[clean_caller] = now
+
+    # --- בדיקה 2: האם זה האטליז (או עסק אחר ב-Supabase)? ---
+    else:
+        business = get_business_from_supabase(clean_bot)
+        if business:
+             biz_name = business.get('business_name', 'העסק')
+             message_body = f"שלום, הגעתם ל{biz_name}. אנחנו לא זמינים טלפונית כרגע, אבל הזמנות בוואטסאפ מתקבלות בשמחה! רשמו לנו כאן מה תרצו."
+
+    # --- שליחת הודעת WHATSAPP (לא SMS) ---
+    if message_body:
+        try:
+            twilio_mgr.messages.create(
+                from_=f"whatsapp:{clean_bot}", # מכריח שליחה מוואטסאפ
+                to=f"whatsapp:{clean_caller}",   # מכריח קבלה בוואטסאפ
+                body=message_body
+            )
+            logger.info(f"Sent WhatsApp auto-reply to {clean_caller}")
+        except Exception as e:
+            logger.error(f"Failed to send WhatsApp: {e}")
+
+    return str(VoiceResponse())
 
 @app.route("/incoming", methods=['POST'])
 def incoming_voice():
-    # שומר על הלוגיקה המקורית של סינון שיחות
+    # מנתק את השיחה (כדי שהסטטוס ירוץ)
     return str(VoiceResponse())
 
 @app.route("/", methods=['GET'])
