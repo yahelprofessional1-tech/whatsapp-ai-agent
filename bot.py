@@ -125,6 +125,7 @@ class LawyerAgent:
         - "איך מתחילים תהליך משמורת?" → "צריך להגיש תביעה לבית משפט. עו\"ד חסקי ירכז את כל המסמכים."
         כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים.
         "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה "
+
         📍 **שלב 3: קבלת שם**
         אם אין לך שם עדיין:
         - "מה שמך המלא?" (פשוט וישיר)
@@ -235,6 +236,10 @@ lawyer_ai = LawyerAgent()
 def handle_lawyer_flow(sender, incoming_msg, bot_number):
     if incoming_msg.lower() == "reset":
         lawyer_sessions[sender] = 'START'
+        # --- FIX: CLEAR AI MEMORY ON RESET ---
+        if sender in lawyer_ai.chats:
+            del lawyer_ai.chats[sender]
+        # -------------------------------------
         return send_lawyer_menu(sender, "🔄 *System Reset*", LawyerConfig.FLOW_STATES['START']['options'], bot_number)
 
     if sender not in lawyer_sessions:
