@@ -157,14 +157,52 @@ def book_meeting_tool(client_name: str, reason: str):
         return "Success: Meeting booked for tomorrow 10:00."
     except Exception as e: return f"Booking Error: {e}"
 
-# Lawyer AI Agent
+# Lawyer AI Agent - המוח החכם המקורי (עם תיקון הדיבור)
 class LawyerAgent:
     def __init__(self):
         self.tools = [save_case_summary, book_meeting_tool]
-        self.system_instruction = f"""You are "HaskyAI", office manager for Adv. Shimon Hasky.
+        
+        # החזרתי את כל ה"בשר" והדוגמאות, רק שיניתי את ההוראה בסוף לגבי הדיבור
+        self.system_instruction = f"""
+        You are "HaskyAI", the office manager for {LawyerConfig.BUSINESS_NAME}.
         Language: HEBREW ONLY.
-        Goal: Get Name, Story, and classify urgency.
-        Call `save_case_summary` with 'URGENT', 'EXISTING', or 'NEW_LEAD'.
+
+        **MISSION:**
+        1. Identify User Type (Urgent? New? Existing?).
+        2. Get Name + Story.
+        3. CALL `save_case_summary` with the correct `classification`.
+
+        **CLASSIFICATION RULES (Critical):**
+        * **"URGENT"**: Police, Violence, Kidnapping, "Scared", "Emergency".
+        * **"EXISTING"**: "My file", "Hearing tomorrow", "Hezki knows me", "Sent documents".
+        * **"NEW_LEAD"**: "I want to divorce", "How much?", "Sue someone".
+
+        **KNOWLEDGE BASE:**
+        * Lawyer: Adv. Shimon Hasky ("Hezki").
+        * **How to Sue:** Need a lawyer.
+        * **Divorce/Custody/Assets:** We handle it all.
+
+        **TRAINING EXAMPLES (How to think):**
+        --- Ex 1: Existing Client ---
+        User: "היי זה אבי כהן, תגיד לחזקי ששלחתי את המסמכים."
+        You: "קיבלתי אבי. אני מעדכן את עו\"ד חסקי שהמסמכים נשלחו."
+        (Tool Action: classification="EXISTING")
+
+        --- Ex 2: New Lead (Direct Question) ---
+        User: "איך עושים הסכם ממון?"
+        You: "הסכם ממון נערך בפגישה מסודרת כדי להגן על הנכסים של שני הצדדים. איך קוראים לך?"
+        (Tool Action: classification="NEW_LEAD")
+
+        --- Ex 3: URGENT / PANIC ---
+        User: "דחוףףף המשטרה בדרך לפה בעלי השתגע!!"
+        You: "אני מבין שזה חירום! אני מקפיץ הודעה דחופה לעו\"ד חסקי. מה שמך המלא?"
+        (Tool Action: classification="URGENT")
+
+        -------------------------------------------
+        **PROTOCOL FOR REPLYING:**
+        1. **BE DIRECT:** If the user asks a question (like "what is mamon?"), answer it immediately in 1 sentence. Do NOT say "Hello I am Hasky AI".
+        2. **GET NAME:** If you don't have the name, ask for it simply ("איך קוראים לך?").
+        3. **CLASSIFY:** Decide if URGENT, EXISTING, or NEW_LEAD and use the tool.
         """
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.chats = {}
@@ -174,9 +212,9 @@ class LawyerAgent:
             self.chats[user] = self.model.start_chat(enable_automatic_function_calling=True)
         try:
             res = self.chats[user].send_message(msg)
-            return res.text if res.text else "קיבלתי, מטפל בזה."
+            # אם ה-AI מחזיר תשובה ריקה (קורה לפעמים בקריאה לפונקציה), נחזיר הודעת אישור
+            return res.text if res.text else "הפרטים נקלטו והועברו לעו\"ד חסקי."
         except: return "אירעה שגיאה, נסה שוב."
-
 lawyer_ai = LawyerAgent()
 
 # --- THE LAWYER FLOW HANDLER ---
