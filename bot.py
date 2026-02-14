@@ -1,188 +1,411 @@
 import os
 import json
 import datetime
-from flask import Flask, request
+import logging
+from flask import Flask, request, g
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 import google.generativeai as genai
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-import gspread
 from dotenv import load_dotenv
+from supabase import create_client, Client as SupabaseClient
 
+# --- 1. SYSTEM SETUP ---
 load_dotenv()
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("HybridBot")
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-BUSINESS_NAME = "Boaron Butchery"
-# WE USE THE ID NOW (This fixes the "Technical Error")
-SHEET_ID = "1GuXkaBAUfswXwA1uwytrouqhepOASyW35h4GVaC5bQ0" 
-MENU_ITEMS = "בשר בקר, עוף, הודו, אווז" 
-
-# --- MEMORY STORAGE (State Machine) ---
-# Tracks: 'IDLE', 'ASK_NAME', 'ASK_ADDRESS'
-user_sessions = {}
-
-# --- CREDENTIALS ---
-if not os.path.exists('credentials.json'):
-    google_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
-    if google_json:
-        with open('credentials.json', 'w') as f:
-            f.write(google_json)
-
-TWILIO_WHATSAPP_NUMBER = 'whatsapp:+14155238886'
+# --- GLOBAL CONFIG ---
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-CALENDAR_ID = os.getenv('CALENDAR_ID')
-SERVICE_ACCOUNT_FILE = 'credentials.json'
+TWILIO_SID = os.getenv('TWILIO_SID')
+TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
+LAWYER_NUMBER_ENV = os.getenv('LAWYER_WHATSAPP_NUMBER') 
 
-# --- 1. SETUP AI ---
+# Supabase Setup
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 try:
-    if GOOGLE_API_KEY:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest')
-except: print("AI Error")
+    supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
+except:
+    logger.error("Supabase connection failed (Check .env)")
+    supabase = None
 
-# --- 2. SETUP GOOGLE SERVICES ---
-calendar_service = None
-sheet_service = None
+# Google AI Setup
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
-try:
-    if os.path.exists(SERVICE_ACCOUNT_FILE):
-        # Calendar
-        cal_scopes = ['https://www.googleapis.com/auth/calendar']
-        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=cal_scopes)
-        calendar_service = build('calendar', 'v3', credentials=creds)
-        
-        # Sheets (OPEN BY ID FIX)
-        gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
-        sheet_service = gc.open_by_key(SHEET_ID).sheet1
-        print("✅ Services Connected!")
-except Exception as e: 
-    print(f"❌ Google Error: {e}")
+# Twilio Client
+twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 
-# --- HELPERS ---
-def book_meeting(event_summary, event_time_iso):
-    if not calendar_service: return False
-    try:
-        start_dt = datetime.datetime.fromisoformat(event_time_iso)
-        end_dt = start_dt + datetime.timedelta(hours=1)
-        event = {
-            'summary': event_summary,
-            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Jerusalem'},
-            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Jerusalem'},
-        }
-        calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        return True
-    except: return False
+# ==============================================================================
+#                 ZONE A: THE LAWYER BOT (EMPATHETIC CONFIRMATION)
+# ==============================================================================
 
-def save_order_to_sheet(phone, data):
-    if not sheet_service: return False
-    try:
-        date_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        # Row: Date | Phone | Name | Address | Items | Status
-        row = [date_now, phone, data.get('name'), data.get('address'), data.get('items'), "Pending"]
-        sheet_service.append_row(row)
-        return True
-    except Exception as e:
-        print(f"Write Error: {e}")
-        return False
+lawyer_sessions = {}
+last_auto_replies = {} 
 
-# --- ROUTES ---
-@app.route("/incoming", methods=['POST'])
-def incoming_call():
-    from twilio.twiml.voice_response import VoiceResponse
-    return str(VoiceResponse())
-
-@app.route("/whatsapp", methods=['POST'])
-def whatsapp_reply():
-    incoming_msg = request.values.get('Body', '').strip()
-    sender = request.values.get('From', '')
+class LawyerConfig:
+    BUSINESS_NAME = "Adv. Shimon Hasky"
+    LAWYER_PHONE = os.getenv('LAWYER_PHONE') # חזקי
+    VIP_NUMBERS = [LAWYER_PHONE]
+    COOL_DOWN_HOURS = 24
     
-    # 1. CREATE SESSION
-    if sender not in user_sessions:
-        user_sessions[sender] = {'state': 'IDLE', 'data': {}}
-    
-    session = user_sessions[sender]
-    state = session['state']
-    ai_reply = ""
+    FLOW_STATES = {
+        "START": {
+            "message": """שלום, הגעתם למשרד עו"ד שמעון חסקי. ⚖️\nאני העוזר החכם של המשרד.\nכדי שנתקדם, תוכל לבחור נושא, או לכתוב לי ישר מה קרה.\n1️⃣ גירושין\n2️⃣ משמורת ילדים\n3️⃣ הסכמי ממון\n4️⃣ צוואות וירושות\n5️⃣ תיאום פגישה\n6️⃣ 🤖 התייעצות עם נציג (AI)""",
+            "options": [
+                { "label": "גירושין", "next": "AI_MODE_SUMMARY" },
+                { "label": "משמורת ילדים", "next": "AI_MODE_SUMMARY" },
+                { "label": "הסכמי ממון", "next": "AI_MODE_SUMMARY" },
+                { "label": "צוואות וירושות", "next": "AI_MODE_SUMMARY" },
+                { "label": "תיאום פגישה", "next": "ASK_BOOKING" },
+                { "label": "נציג וירטואלי", "next": "AI_MODE" }
+            ]
+        },
+        "ASK_BOOKING": { "message": "מתי תרצה להיפגש?", "next": "FINISH_BOOKING" },
+        "FINISH_BOOKING": { "message": "העברתי בקשה למזכירות לתיאום פגישה, נחזור אליך בהקדם.", "action": "book_meeting" }
+    }
 
-    # --- STATE 1: ASK NAME ---
-    if state == 'ASK_NAME':
-        session['data']['name'] = incoming_msg
-        session['state'] = 'ASK_ADDRESS' 
-        ai_reply = f"נעים להכיר, {incoming_msg}. לאיזו כתובת לשלוח את ההזמנה?"
+# --- Helper: Auto-Fix Phone Number ---
+def ensure_whatsapp_prefix(phone):
+    if not phone: return None
+    clean = phone.strip()
+    if not clean.startswith("whatsapp:"):
+        return f"whatsapp:{clean}"
+    return clean
 
-    # --- STATE 2: ASK ADDRESS ---
-    elif state == 'ASK_ADDRESS':
-        session['data']['address'] = incoming_msg
+# Tool: Save Case (FIXED: Get Real Phone from Request)
+def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown", classification: str = "NEW_LEAD"):
+    try:
+        # FIX: Ignore what the AI says, grab the REAL sender number
+        real_sender = request.values.get('From', '')
         
-        # FINISH: Save
-        if save_order_to_sheet(sender, session['data']):
-            ai_reply = "תודה רבה! ההזמנה נרשמה בהצלחה. יום טוב!"
+        clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
+        wa_link = f"https://wa.me/{clean_phone}"
+        
+        header = "🚨 *חירום!*" if classification == "URGENT" else "✨ *ליד חדש*"
+        body = f"""{header}\n👤 {name}\n📌 {topic}\n📝 {summary}\n{wa_link}"""
+        
+        # Send to Lawyer (with auto-fix for his number)
+        target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+        
+        if twilio_mgr and target_phone:
+            twilio_mgr.messages.create(from_=request.values.get('To'), body=body, to=target_phone)
+            return f"SAVED as {classification}."
         else:
-            ai_reply = "הייתה תקלה טכנית. נא להתקשר."
-        
-        del user_sessions[sender]
+            return f"SAVED as {classification} (Note: Lawyer phone not configured)."
+            
+    except Exception as e: return f"Error: {e}"
 
-    # --- STATE 3: IDLE (STRICT MENU LOGIC) ---
-    else:
-        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        tool_prompt = f"""
-        Current Time: {current_time}
-        User Message: "{incoming_msg}"
-        VALID MENU (HEBREW): {MENU_ITEMS}
+# Tool: Book Meeting
+def book_meeting_tool(client_name: str, reason: str):
+    target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+    if twilio_mgr and target_phone:
+         twilio_mgr.messages.create(
+             from_=request.values.get('To'),
+             body=f"📅 *בקשה לפגישה*\nלקוח: {client_name}\nסיבה: {reason}",
+             to=target_phone
+         )
+    return "Success"
+
+class LawyerAgent:
+    def __init__(self):
+        self.tools = [save_case_summary, book_meeting_tool]
         
-        INSTRUCTIONS:
-        1. FILTER: Is the user trying to order something? 
-           - If YES: Check if items are in VALID MENU.
-           - IF VALID -> Return action="order", items="...".
-           - IF INVALID (Pizza, Elephant) -> Return action="chat" (Do NOT order).
+        self.system_instruction = f"""
+        אתה עוזר הקבלה של {LawyerConfig.BUSINESS_NAME}.
+
+        **זהות וטון:**
+        אתה לא רובוט. אתה מזכיר/ה אנושי/ת ומקצועי/ת בוואטסאפ.
+        דבר בעברית טבעית, חמה, ותומכת. אל תשתמש במשפטים רובוטיים.
+
+        **המטרה שלך (לפי סדר עדיפויות):**
+        1. אם הלקוח שאל שאלה - ענה קצר וישיר (1-2 משפטים).
+        2. קבל שם מלא של הלקוח.
+        3. הבן את הבעיה המשפטית.
+        4. סווג ושמור את התיק.
+
+        **תהליך השיחה - עקוב בדיוק:**
+
+        📍 **שלב 1: אמפתיה ראשונית**
+        אם הלקוח מביע כאב/מצוקה/פחד, התחל עם:
+        - "מצטער/ת לשמוע, אני כאן לעזור."
+        - "זה נשמע קשה, בואי נראה איך אפשר לקדם."
+        - אל תזלזל ברגשות. אל תמהר.
+
+        📍 **שלב 2: תשובה לשאלה (אם יש)**
+        אם הלקוח שאל שאלה כללית:
+        - "כמה עולה גירושין?" → "המחיר משתנה בהתאם למורכבות התיק (ילדים, רכוש). עו\"ד חסקי ייתן הערכה מדויקת בפגישה."
+        - "מה זה הסכם ממון?" → "הסכם שקובע חלוקת רכוש במקרה של פרידה. נעשה לפני או אחרי נישואין."
+        - "איך מתחילים תהליך משמורת?" → "צריך להגיש תביעה לבית משפט. עו\"ד חסקי ירכז את כל המסמכים."
+        כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים.
+        "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה "
+
+        📍 **שלב 3: קבלת שם**
+        אם אין לך שם עדיין:
+        - "מה שמך המלא?" (פשוט וישיר)
         
-        2. BOOKING: If asking to meet/schedule -> action="book".
-        3. CHAT: General chat or invalid orders -> action="chat".
-        4. BLOCK: Offensive -> action="block".
+        📍 **שלב 4: הבנת הבעיה (חובה להעמיק!)**
+        שאל שאלה אחת ממוקדת:
+        - גירושין: "יש ילדים מתחת לגיל 18?"
+        - משמורת: "הילדים איתך או עם הצד השני?"
+        - ירושה: "יש צוואה כתובה?"
+        - תאונה: "מתי זה קרה?"
+        אם הלקוח נתן תשובה קצרה מדי, תשאל שוב: "תוכל לפרט קצת יותר?"
+
+        📍 **שלב 5: סיכום ואישור (בסגנון אנושי)**
+        לפני שאתה שומר את התיק, אתה חייב לסכם ללקוח את מה שהבנת ולשאול אם הוא רוצה להוסיף משהו.
         
-        Output JSON ONLY:
-        Ex: {{"action": "order", "items": "2kg Entrecote"}}
+        **השתמש בדיוק במבנה הבא:**
+        1. הבעת אמפתיה (אם רלוונטי).
+        2. "אז אני מבין ש..." (סיכום המקרה).
+        3. סיום עם השאלה: **"תרצי להוסיף משהו לפני שאעביר לעו"ד חסקי?"**
+
+        רק כשהלקוח עונה "לא", "זהו", או מאשר --> תקרא לפונקציה `save_case_summary`.
+
+        **דוגמה לשיחה נכונה (לפי זה תעבוד):**
+        לקוח: "אבא שלי נפטר ואני צריכה עזרה עם הירושה."
+        אתה: "אני מצטער לשמוע על אבא שלך. אז אני מבין שאת רוצה שעו\"ד חסקי יחזור אלייך כדי לדון בענייני ירושה לאחר פטירת אביך. תרצי להוסיף משהו לפני שאעביר לעו\"ד חסקי?"
+        לקוח: "לא, זה הכל."
+        אתה: (שומר ושולח) "בסדר גמור. הפרטים הועברו, נחזור אליך בהקדם."
+
+        **חוקי סיווג (CLASSIFICATION):**
+
+        🔥 **"URGENT"** - השתמש כשיש:
+        - מילות חירום: "דחוף", "משטרה", "אלימות", "חטיפה", "מפחד/ת", "עכשיו"
+        - סימני פניקה: "!!!", "עזרה"
+        - סכנה פיזית או נפשית מיידית
+        דוגמה: "בעלי איים עליי עם סכין!!!"
+
+        📁 **"EXISTING"** - השתמש כשיש:
+        - "התיק שלי", "הדיון שלי", "שלחתי מסמכים", "חזקי יודע עליי"
+        - "הפגישה מחר", "המשך התיק"
+        - כל אזכור של קשר קיים עם המשרד
+        דוגמה: "היי זה משה כהן, תגיד לחזקי שהכל מוכן לדיון מחר"
+
+        ✨ **"NEW_LEAD"** - השתמש כשיש:
+        - "רוצה להתגרש", "צריך עורך דין", "איך מתחילים הליך"
+        - "כמה זה עולה?", "אפשר לקבוע פגישה?"
+        - כל פנייה ראשונה למשרד
+        דוגמה: "שלום, אני רוצה לתבוע את המעסיק שלי"
+
+        **כללי זהב - קרא לפני כל תשובה:**
+
+        ✅ **תמיד עשה:**
+        - דבר בעברית פשוטה וברורה
+        - אם לקוח רגשי - האט, הקשב, תמוך
+        - שאל שאלה אחת בכל פעם
+        - אם יש שאלה - ענה קודם
+        - **בקש אישור מהלקוח לפני שמירה בנוסח האמפתי שביקשתי**
+
+        ❌ **לעולם אל תעשה:**
+        - לא לכתוב קוד Python
+        - לא לשאול מספר טלפון (כבר יש לך)
+        - לא לכתוב משפטים ארוכים
+        - לא להשתמש במילים כמו "בבקשה עקוב אחרי השלבים"
+        - לא לחזור על מידע שהלקוח כבר אמר
+        - **לא לשאול "האם הסיכום מדויק?" (זה רובוטי)** - תשאל "תרצי להוסיף משהו?"
+
+        **טיפול בשגיאות:**
+        אם הפונקציה החזירה "Saved to Database" - תגיד:
+        "הפרטים נשמרו והועברו לעו\"ד חסקי."
         """
+        self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
+        self.chats = {}
+
+    def chat(self, user, msg):
+        if user not in self.chats:
+            self.chats[user] = self.model.start_chat(enable_automatic_function_calling=True)
+        try:
+            res = self.chats[user].send_message(msg)
+            return res.text if res.text else "הפרטים נקלטו."
+        except: return "אירעה שגיאה, נסה שוב."
+
+lawyer_ai = LawyerAgent()
+
+def handle_lawyer_flow(sender, incoming_msg, bot_number):
+    if incoming_msg.lower() == "reset":
+        lawyer_sessions[sender] = 'START'
+        # --- FIX 2: CLEAR AI MEMORY ON RESET ---
+        if sender in lawyer_ai.chats:
+            del lawyer_ai.chats[sender]
+        # ---------------------------------------
+        return send_lawyer_menu(sender, "🔄 *System Reset*", LawyerConfig.FLOW_STATES['START']['options'], bot_number)
+
+    if sender not in lawyer_sessions:
+        lawyer_sessions[sender] = 'START'
+        return send_lawyer_menu(sender, LawyerConfig.FLOW_STATES['START']['message'], LawyerConfig.FLOW_STATES['START']['options'], bot_number)
+
+    if incoming_msg.isdigit() and lawyer_sessions[sender] == 'START':
+        idx = int(incoming_msg) - 1
+        options = LawyerConfig.FLOW_STATES['START']['options']
+        if 0 <= idx < len(options):
+            selected = options[idx]
+            if selected['next'] == 'AI_MODE_SUMMARY':
+                lawyer_sessions[sender] = 'AI_MODE'
+                reply = lawyer_ai.chat(sender, f"User chose: {selected['label']}. Start conversation.")
+                return send_lawyer_msg(sender, reply, bot_number)
+            elif selected['next'] == 'ASK_BOOKING':
+                lawyer_sessions[sender] = 'ASK_BOOKING'
+                return send_lawyer_msg(sender, LawyerConfig.FLOW_STATES['ASK_BOOKING']['message'], bot_number)
+            elif selected['next'] == 'AI_MODE':
+                lawyer_sessions[sender] = 'AI_MODE'
+                return send_lawyer_msg(sender, "היי, אני כאן. איך אפשר לעזור?", bot_number)
+
+    if lawyer_sessions[sender] == 'ASK_BOOKING':
+        book_meeting_tool(sender, "Manual Booking")
+        lawyer_sessions[sender] = 'START'
+        return send_lawyer_msg(sender, LawyerConfig.FLOW_STATES['FINISH_BOOKING']['message'], bot_number)
+
+    reply = lawyer_ai.chat(sender, incoming_msg)
+    return send_lawyer_msg(sender, reply, bot_number)
+
+def send_lawyer_msg(to, body, from_):
+    twilio_mgr.messages.create(from_=from_, body=body, to=to)
+    return str(MessagingResponse())
+
+def send_lawyer_menu(to, body, options, from_):
+    try:
+        rows = [{"id": opt["label"], "title": opt["label"][:24]} for opt in options]
+        payload = {"type": "list", "header": {"type": "text", "text": "תפריט"}, "body": {"text": body}, "action": {"button": "בחירה", "sections": [{"title": "אפשרויות", "rows": rows}]}}
+        twilio_mgr.messages.create(from_=from_, to=to, body=body, persistent_action=[json.dumps(payload)])
+    except:
+        opts_text = "\n".join([f"{i+1}. {opt['label']}" for i, opt in enumerate(options)])
+        twilio_mgr.messages.create(from_=from_, to=to, body=f"{body}\n{opts_text}")
+    return str(MessagingResponse())
+
+# ==============================================================================
+#                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS)
+# ==============================================================================
+
+def save_order_supabase(name: str, order_details: str, method: str, address: str, timing: str, phone: str):
+    try:
+        current_business = getattr(g, 'business_config', None)
+        if not current_business: return "Error: No business context."
+        owner_phone = current_business.get('owner_phone')
+        bot_number = current_business.get('phone_number')
+        
+        # Auto-fix phone for Supabase business owner too
+        owner_phone = ensure_whatsapp_prefix(owner_phone)
+
+        if twilio_mgr and owner_phone:
+             twilio_mgr.messages.create(
+                 from_=bot_number,
+                 to=owner_phone,
+                 body=f"New Order!\nName: {name}\nDetails: {order_details}\nAddress: {address}"
+             )
+        return "Order Saved & Sent to Owner."
+    except Exception as e: return f"Error: {e}"
+
+class SupabaseAgent:
+    def __init__(self):
+        self.chats = {}
+
+    def get_response(self, user_phone, msg, config):
+        chat_id = f"{config['phone_number']}_{user_phone}"
+        if chat_id not in self.chats or msg.lower() == "reset":
+            sys_instruct = config.get('system_instruction', 'You are a helpful assistant.')
+            model = genai.GenerativeModel('gemini-2.0-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
+            self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
         
         try:
-            raw = model.generate_content(tool_prompt).text
-            clean_json = raw.replace('```json', '').replace('```', '').strip()
-            data = json.loads(clean_json)
-            action = data.get("action", "chat")
-            
-            if action == "block":
-                ai_reply = "נא לשמור על שפה מכבדת."
-
-            elif action == "book":
-                iso_time = data.get("iso_time")
-                if book_meeting(f"Meeting: {sender}", iso_time):
-                    ai_reply = f"קבעתי לך פגישה לתאריך {iso_time}."
-                else:
-                    ai_reply = "הייתה תקלה ביומן."
-
-            elif action == "order":
-                # START SALES FUNNEL
-                session['state'] = 'ASK_NAME'
-                session['data']['items'] = data.get("items")
-                ai_reply = f"בשמחה, רשמתי {data.get('items')}. \nכדי להשלים, מה השם שלך?"
-            
-            else: # Normal Chat (Direct)
-                chat_prompt = f"""
-                You are Alice at {BUSINESS_NAME}.
-                Reply in Hebrew. Be direct.
-                If they say "Hi", ask "What would you like to order?".
-                User: {incoming_msg}
-                """
-                ai_reply = model.generate_content(chat_prompt).text
+            return self.chats[chat_id].send_message(msg).text
         except:
-            ai_reply = "אני בודקת..."
+            del self.chats[chat_id]
+            return "תקלה רגעית, נסה שוב."
 
+supabase_agent = SupabaseAgent()
+
+def get_business_from_supabase(bot_number):
+    if not supabase: return None
+    clean = bot_number if bot_number.startswith("whatsapp:") else f"whatsapp:{bot_number}"
+    res = supabase.table('clients').select("*").eq('phone_number', clean).execute()
+    return res.data[0] if res.data else None
+
+def handle_supabase_flow(sender, msg, bot_number):
+    business = get_business_from_supabase(bot_number)
+    if not business: return str(MessagingResponse()) 
+    g.business_config = business
+    reply = supabase_agent.get_response(sender, msg, business)
     resp = MessagingResponse()
-    resp.message(ai_reply)
+    resp.message(reply)
     return str(resp)
+
+# ==============================================================================
+#                 MAIN ROUTER
+# ==============================================================================
+
+@app.route("/whatsapp", methods=['POST'])
+def main_router():
+    incoming_msg = request.values.get('Body', '').strip()
+    sender = request.values.get('From', '')
+    bot_number = request.values.get('To', '') 
+    clean_bot_num = bot_number.replace("whatsapp:", "").strip()
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+
+    if clean_bot_num == clean_lawyer_env:
+        return handle_lawyer_flow(sender, incoming_msg, bot_number)
+    else:
+        return handle_supabase_flow(sender, incoming_msg, bot_number)
+
+# ==============================================================================
+#                 ZONE C: INCOMING CALL (REJECT & WHATSAPP)
+# ==============================================================================
+
+@app.route("/incoming", methods=['POST'])
+def incoming_voice():
+    caller = request.values.get('From', '') 
+    bot_number = request.values.get('To', '')
+    clean_caller = caller.replace("whatsapp:", "")
+    clean_bot = bot_number.replace("whatsapp:", "")
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+    message_body = None
+
+    # 1. Lawyer Logic
+    if clean_bot == clean_lawyer_env:
+        if clean_caller in LawyerConfig.VIP_NUMBERS:
+            resp = VoiceResponse()
+            resp.reject()
+            return str(resp)
+        
+        now = datetime.datetime.now()
+        last = last_auto_replies.get(clean_caller)
+        if last and (now - last).total_seconds() < (LawyerConfig.COOL_DOWN_HOURS * 3600):
+            resp = VoiceResponse()
+            resp.reject()
+            return str(resp)
+
+        message_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. איננו זמינים כרגע לשיחה, אך נשמח לעזור כאן בוואטסאפ! אנא רשמו לנו במה מדובר."
+        last_auto_replies[clean_caller] = now
+
+    # 2. Supabase Logic (Butcher etc.)
+    else:
+        business = get_business_from_supabase(clean_bot)
+        if business:
+            biz_name = business.get('business_name', 'העסק')
+            message_body = f"שלום, הגעתם ל{biz_name}. אנחנו לא פנויים לשיחה כרגע, אבל זמינים להזמנות כאן בוואטסאפ!"
+
+    # 3. Send WhatsApp
+    if message_body:
+        try:
+            twilio_mgr.messages.create(
+                from_=f"whatsapp:{clean_bot}",
+                to=f"whatsapp:{clean_caller}",
+                body=message_body
+            )
+            logger.info(f"Missed call handled. WhatsApp sent to {clean_caller}")
+        except Exception as e:
+            logger.error(f"Error sending WhatsApp: {e}")
+
+    # 4. Reject Call
+    resp = VoiceResponse()
+    resp.reject()
+    return str(resp)
+
+@app.route("/", methods=['GET'])
+def health_check():
+    return "Hybrid Bot System Active 🚀", 200
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
