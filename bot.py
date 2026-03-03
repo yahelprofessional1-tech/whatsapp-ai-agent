@@ -312,8 +312,9 @@ def incoming_voice():
 
     resp = VoiceResponse()
     
-    # Premium Israeli Male Voice
-    HEBREW_VOICE = 'Google.he-IL-Wavenet-C'
+    # Premium Israeli Male Voice & Advanced Speech Recognition Hints
+    HEBREW_VOICE = 'Google.he-IL-Wavenet-B'
+    HEBREW_HINTS = "גירושין, משמורת, עורך דין, חסקי, תביעה, ילדים, הסכם, ממון, צוואה, ירושה, פגישה, שלום, כן, לא, תודה"
 
     # 1. Determine which business they called
     if clean_bot == clean_lawyer_env:
@@ -329,8 +330,17 @@ def incoming_voice():
             resp.hangup()
             return str(resp)
 
-    # 2. Speak greeting and open mic to listen
-    gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
+    # 2. Speak greeting and open mic to listen (Enhanced ML, Phone Call Model, Faster Timeout)
+    gather = resp.gather(
+        input='speech', 
+        action='/voice_loop', 
+        timeout=2, 
+        speechTimeout='auto', 
+        language='he-IL', 
+        speechModel='phone_call', 
+        enhanced=True, 
+        hints=HEBREW_HINTS
+    )
     gather.say(greeting, language='he-IL', voice=HEBREW_VOICE)
     resp.append(gather)
 
@@ -352,8 +362,9 @@ def voice_loop():
 
     resp = VoiceResponse()
     
-    # Premium Israeli Male Voice
-    HEBREW_VOICE = 'Google.he-IL-Wavenet-C'
+    # Premium Israeli Male Voice & Advanced Speech Recognition Hints
+    HEBREW_VOICE = 'Google.he-IL-Wavenet-B'
+    HEBREW_HINTS = "גירושין, משמורת, עורך דין, חסקי, תביעה, ילדים, הסכם, ממון, צוואה, ירושה, פגישה, שלום, כן, לא, תודה"
 
     # If the speech-to-text failed to capture anything
     if not user_speech:
@@ -383,8 +394,17 @@ def voice_loop():
         resp.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
         resp.hangup()
     else:
-        # Speak the AI's response and open the mic again to keep the loop going
-        gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
+        # Speak the AI's response and open the mic again to keep the loop going (Enhanced ML, Phone Call Model, Faster Timeout)
+        gather = resp.gather(
+            input='speech', 
+            action='/voice_loop', 
+            timeout=2, 
+            speechTimeout='auto', 
+            language='he-IL', 
+            speechModel='phone_call', 
+            enhanced=True, 
+            hints=HEBREW_HINTS
+        )
         gather.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
         resp.append(gather)
         
