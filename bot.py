@@ -286,8 +286,10 @@ def main_router():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
-    clean_bot_num = bot_number.replace("whatsapp:", "").strip()
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+    
+    # Strip everything (whatsapp: and +) to ensure perfect matching
+    clean_bot_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
 
     if clean_bot_num == clean_lawyer_env:
         return handle_lawyer_flow(sender, incoming_msg, bot_number)
@@ -304,11 +306,14 @@ def incoming_voice():
     caller = request.values.get('From', '') 
     bot_number = request.values.get('To', '')
     
-    clean_caller = caller.replace("whatsapp:", "")
-    clean_bot = bot_number.replace("whatsapp:", "")
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+    clean_caller = caller.replace("whatsapp:", "").replace("+", "").strip()
+    clean_bot = bot_number.replace("whatsapp:", "").replace("+", "").strip()
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
 
     resp = VoiceResponse()
+    
+    # Premium Israeli Male Voice
+    HEBREW_VOICE = 'Google.he-IL-Wavenet-C'
 
     # 1. Determine which business they called
     if clean_bot == clean_lawyer_env:
@@ -319,17 +324,18 @@ def incoming_voice():
             biz_name = business.get('business_name', 'העסק')
             greeting = f"שלום, הגעתם ל{biz_name}. אני העוזר הווירטואלי, מה תרצו להזמין היום?"
         else:
-            resp.say("המספר אינו מחובר למערכת. להתראות.", language="he-IL")
+            # If the phone number isn't found in the Supabase clients table
+            resp.say("המספר אינו מחובר למערכת. להתראות.", language="he-IL", voice=HEBREW_VOICE)
             resp.hangup()
             return str(resp)
 
     # 2. Speak greeting and open mic to listen
     gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
-    gather.say(greeting, language='he-IL')
+    gather.say(greeting, language='he-IL', voice=HEBREW_VOICE)
     resp.append(gather)
 
     # 3. Fallback if they say absolutely nothing
-    resp.say("לא שמעתי תגובה, נתראה בפעם הבאה.", language="he-IL")
+    resp.say("לא שמעתי תגובה, נתראה בפעם הבאה.", language="he-IL", voice=HEBREW_VOICE)
     resp.hangup()
     return str(resp)
 
@@ -341,14 +347,17 @@ def voice_loop():
     bot_number = request.values.get('To', '')
     user_speech = request.values.get('SpeechResult', '') 
     
-    clean_bot = bot_number.replace("whatsapp:", "")
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+    clean_bot = bot_number.replace("whatsapp:", "").replace("+", "").strip()
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
 
     resp = VoiceResponse()
+    
+    # Premium Israeli Male Voice
+    HEBREW_VOICE = 'Google.he-IL-Wavenet-C'
 
     # If the speech-to-text failed to capture anything
     if not user_speech:
-        resp.say("סליחה, לא הבנתי. תוכל לחזור על זה?", language="he-IL")
+        resp.say("סליחה, לא הבנתי. תוכל לחזור על זה?", language="he-IL", voice=HEBREW_VOICE)
         resp.redirect("/incoming")
         return str(resp)
 
@@ -356,7 +365,7 @@ def voice_loop():
     if clean_bot == clean_lawyer_env:
         reply_text = lawyer_ai.chat(caller, user_speech)
     else:
-        business = get_business_from_supabase(bot_number)
+        business = get_business_from_supabase(clean_bot)
         if not business:
             resp.hangup()
             return str(resp)
@@ -371,16 +380,16 @@ def voice_loop():
 
     if is_done:
         # Speak the final confirmation and hang up
-        resp.say(clean_reply, language="he-IL")
+        resp.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
         resp.hangup()
     else:
         # Speak the AI's response and open the mic again to keep the loop going
         gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
-        gather.say(clean_reply, language="he-IL")
+        gather.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
         resp.append(gather)
         
         # Fallback if they stop talking mid-conversation
-        resp.say("סיימנו, להתראות.", language="he-IL")
+        resp.say("סיימנו, להתראות.", language="he-IL", voice=HEBREW_VOICE)
         resp.hangup()
 
     return str(resp)
