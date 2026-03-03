@@ -75,19 +75,16 @@ def ensure_whatsapp_prefix(phone):
         return f"whatsapp:{clean}"
     return clean
 
-# Tool: Save Case (FIXED: Get Real Phone from Request)
+# Tool: Save Case 
 def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown", classification: str = "NEW_LEAD"):
     try:
-        # FIX: Ignore what the AI says, grab the REAL sender number
         real_sender = request.values.get('From', '')
-        
         clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
         
         header = "🚨 *חירום!*" if classification == "URGENT" else "✨ *ליד חדש*"
         body = f"""{header}\n👤 {name}\n📌 {topic}\n📝 {summary}\n{wa_link}"""
         
-        # Send to Lawyer (with auto-fix for his number)
         target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
         
         if twilio_mgr and target_phone:
@@ -117,9 +114,12 @@ class LawyerAgent:
         אתה עוזר הקבלה של {LawyerConfig.BUSINESS_NAME}.
 
         **זהות וטון:**
-        אתה לא רובוט. אתה מזכיר אנושי ומקצועי בוואטסאפ.
+        אתה לא רובוט. אתה מזכיר אנושי ומקצועי.
         דבר בעברית טבעית, חמה, ותומכת. אל תשתמש במשפטים רובוטיים.
-                                            תדבר רק בלשון זכר 
+        
+        **שפה ומגדר (קריטי):**
+        פנה למשתמש תמיד בלשון זכר כברירת מחדל (אתה, מעוניין, תרצה), אלא אם המשתמש מדבר על עצמו במפורש בלשון נקבה. לעולם אל תערבב זכר ונקבה באותו משפט.
+
         **המטרה שלך (לפי סדר עדיפויות):**
         1. אם הלקוח שאל שאלה - ענה קצר וישיר (1-2 משפטים).
         2. קבל שם מלא של הלקוח.
@@ -129,87 +129,35 @@ class LawyerAgent:
         **תהליך השיחה - עקוב בדיוק:**
 
         📍 **שלב 1: אמפתיה ראשונית**
-        אם הלקוח מביע כאב/מצוקה/פחד, התחל עם:
-        - "מצטער/ת לשמוע, אני כאן לעזור."
-        - "זה נשמע קשה, בואי נראה איך אפשר לקדם."
-        - אל תזלזל ברגשות. אל תמהר.
+        אם הלקוח מביע כאב/מצוקה/פחד, התחל עם מילות תמיכה והקשבה.
 
         📍 **שלב 2: תשובה לשאלה (אם יש)**
-        אם הלקוח שאל שאלה כללית:
-        - "כמה עולה גירושין?" → "המחיר משתנה בהתאם למורכבות התיק (ילדים, רכוש). עו\"ד חסקי ייתן הערכה מדויקת בפגישה."
-        - "מה זה הסכם ממון?" → "הסכם שקובע חלוקת רכוש במקרה של פרידה. נעשה לפני או אחרי נישואין."
-        - "איך מתחילים תהליך משמורת?" → "צריך להגיש תביעה לבית משפט. עו\"ד חסקי ירכז את כל המסמכים."
-        כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים.
-        "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה "
+        כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים. "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה".
 
         📍 **שלב 3: קבלת שם**
-        אם אין לך שם עדיין:
-        - "מה שמך המלא?" (פשוט וישיר)
+        אם אין לך שם עדיין, פשוט שאל לשמו המלא.
         
-        📍 **שלב 4: הבנת הבעיה (חובה להעמיק!)**
-        שאל שאלה אחת ממוקדת:
-        - גירושין: "יש ילדים מתחת לגיל 18?"
-        - משמורת: "הילדים איתך או עם הצד השני?"
-        - ירושה: "יש צוואה כתובה?"
-        - תאונה: "מתי זה קרה?"
-        אם הלקוח נתן תשובה קצרה מדי, תשאל שוב: "תוכל לפרט קצת יותר?"
+        📍 **שלב 4: הבנת הבעיה**
+        שאל שאלה אחת ממוקדת כדי להבין את המקרה.
 
-        📍 **שלב 5: סיכום ואישור (בסגנון אנושי)**
-        לפני שאתה שומר את התיק, אתה חייב לסכם ללקוח את מה שהבנת ולשאול אם הוא רוצה להוסיף משהו.
-                                 אסור לך לרשום את ההודעה הזאת פעמיים רק פעם אחת ואם הלקוח בוחר להוסיף מידע אתה פשוט עונה . זהו? ואז הוא מאשר אומר כן ואתה ממשיך
-        **השתמש בדיוק במבנה הבא:**
-        1. הבעת אמפתיה (אם רלוונטי).
-        2. "אז אני מבין ש..." (סיכום המקרה).
-        3. סיום עם השאלה: **"האם תרצה להוסיף עוד פרטים לפני שהעביר את ההודעה ?"**
-        
-        רק כשהלקוח עונה "לא", "זהו", או מאשר --> תקרא לפונקציה `save_case_summary`.
+        📍 **שלב 5: סיכום ואישור (פעם אחת בלבד!)**
+        לפני שאתה שומר את התיק, סכם ללקוח את מה שהבנת.
+        השתמש בדיוק במבנה הבא:
+        1. "אז אני מבין ש..." (סיכום המקרה).
+        2. סיום עם השאלה: **"האם תרצה להוסיף עוד פרטים לפני שאעביר את ההודעה?"**
 
-        **דוגמה לשיחה נכונה (לפי זה תעבוד):**
-        לקוח: "אבא שלי נפטר ואני צריכה עזרה עם הירושה."
-        אתה: "אני מצטער לשמוע על אבא שלך. אז אני מבין שאת רוצה שעו\"ד חסקי יחזור אלייך כדי לדון בענייני ירושה לאחר פטירת אביך. תרצי להוסיף משהו לפני שאעביר לעו\"ד חסקי?"
-        לקוח: "לא, זה הכל."
-        אתה: (שומר ושולח) "בסדר גמור. הפרטים הועברו, נחזור אליך בהקדם."
+        **כלל ברזל למניעת לולאות:** שאל את שאלת האישור הזו **פעם אחת ויחידה**. 
+        אם הלקוח עונה "לא", "זהו", או מאשר --> קרא מיד לפונקציה `save_case_summary`.
+        אם הלקוח מאשר אך מוסיף פרט קטן --> הוסף את המידע לסיכום הפנימי שלך וקרא **מיד** לפונקציה `save_case_summary`. **בשום אופן אל תשאל שוב!**
 
         **חוקי סיווג (CLASSIFICATION):**
-
-        🔥 **"URGENT"** - השתמש כשיש:
-        - מילות חירום: "דחוף", "משטרה", "אלימות", "חטיפה", "מפחד/ת", "עכשיו"
-        - סימני פניקה: "!!!", "עזרה"
-        - סכנה פיזית או נפשית מיידית
-        דוגמה: "בעלי איים עליי עם סכין!!!"
-
-        📁 **"EXISTING"** - השתמש כשיש:
-        - "התיק שלי", "הדיון שלי", "שלחתי מסמכים", "חזקי יודע עליי"
-        - "הפגישה מחר", "המשך התיק"
-        - כל אזכור של קשר קיים עם המשרד
-        דוגמה: "היי זה משה כהן, תגיד לחזקי שהכל מוכן לדיון מחר"
-
-        ✨ **"NEW_LEAD"** - השתמש כשיש:
-        - "רוצה להתגרש", "צריך עורך דין", "איך מתחילים הליך"
-        - "כמה זה עולה?", "אפשר לקבוע פגישה?"
-        - כל פנייה ראשונה למשרד
-        דוגמה: "שלום, אני רוצה לתבוע את המעסיק שלי"
-
-        **כללי זהב - קרא לפני כל תשובה:**
-
-        ✅ **תמיד עשה:**
-        - דבר בעברית פשוטה וברורה
-        - אם לקוח רגשי - האט, הקשב, תמוך
-        - שאל שאלה אחת בכל פעם
-        - אם יש שאלה - ענה קודם
-        - **בקש אישור מהלקוח לפני שמירה בנוסח האמפתי שביקשתי**
-
-        ❌ **לעולם אל תעשה:**
-        - לא לכתוב קוד Python
-        - לא לשאול מספר טלפון (כבר יש לך)
-        - לא לכתוב משפטים ארוכים
-        - לא להשתמש במילים כמו "בבקשה עקוב אחרי השלבים"
-        - לא לחזור על מידע שהלקוח כבר אמר
-        - **לא לשאול "האם הסיכום מדויק?" (זה רובוטי)** - תשאל "תרצי להוסיף משהו?"
+        🔥 "URGENT" - מילות חירום: דחוף, משטרה, אלימות.
+        📁 "EXISTING" - קשר קיים: התיק שלי, הדיון שלי.
+        ✨ "NEW_LEAD" - פנייה ראשונה: רוצה להתגרש, כמה עולה.
 
         **טיפול בשגיאות:**
-        אם הפונקציה החזירה "Saved to Database" - תגיד:
-        "הפרטים נשמרו והועברו לעו\"ד חסקי."
+        אם הפונקציה החזירה "Saved" - תגיד רק:
+        "הפרטים נשמרו והועברו לעו"ד חסקי."
         """
         self.model = genai.GenerativeModel('gemini-2.0-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.chats = {}
@@ -227,10 +175,8 @@ lawyer_ai = LawyerAgent()
 def handle_lawyer_flow(sender, incoming_msg, bot_number):
     if incoming_msg.lower() == "reset":
         lawyer_sessions[sender] = 'START'
-        # --- FIX 2: CLEAR AI MEMORY ON RESET ---
         if sender in lawyer_ai.chats:
             del lawyer_ai.chats[sender]
-        # ---------------------------------------
         return send_lawyer_menu(sender, "🔄 *System Reset*", LawyerConfig.FLOW_STATES['START']['options'], bot_number)
 
     if sender not in lawyer_sessions:
@@ -286,7 +232,6 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         
-        # Auto-fix phone for Supabase business owner too
         owner_phone = ensure_whatsapp_prefix(owner_phone)
 
         if twilio_mgr and owner_phone:
@@ -333,7 +278,7 @@ def handle_supabase_flow(sender, msg, bot_number):
     return str(resp)
 
 # ==============================================================================
-#                 MAIN ROUTER
+#                 MAIN ROUTER (WHATSAPP TEXT)
 # ==============================================================================
 
 @app.route("/whatsapp", methods=['POST'])
@@ -350,62 +295,99 @@ def main_router():
         return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
-#                 ZONE C: INCOMING CALL (REJECT & WHATSAPP)
+#                 ZONE C: INCOMING CALLS (VOICE AI LOOP)
 # ==============================================================================
 
 @app.route("/incoming", methods=['POST'])
 def incoming_voice():
+    """Handles the initial phone call and greets the user."""
     caller = request.values.get('From', '') 
     bot_number = request.values.get('To', '')
+    
     clean_caller = caller.replace("whatsapp:", "")
     clean_bot = bot_number.replace("whatsapp:", "")
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
-    message_body = None
 
-    # 1. Lawyer Logic
+    resp = VoiceResponse()
+
+    # 1. Determine which business they called
     if clean_bot == clean_lawyer_env:
-        if clean_caller in LawyerConfig.VIP_NUMBERS:
-            resp = VoiceResponse()
-            resp.reject()
-            return str(resp)
-        
-        now = datetime.datetime.now()
-        last = last_auto_replies.get(clean_caller)
-        if last and (now - last).total_seconds() < (LawyerConfig.COOL_DOWN_HOURS * 3600):
-            resp = VoiceResponse()
-            resp.reject()
-            return str(resp)
-
-        message_body = "שלום, הגעתם למשרד עו\"ד שמעון חסקי. איננו זמינים כרגע לשיחה, אך נשמח לעזור כאן בוואטסאפ! אנא רשמו לנו במה מדובר."
-        last_auto_replies[clean_caller] = now
-
-    # 2. Supabase Logic (Butcher etc.)
+        greeting = "שלום, הגעתם למשרד עורך דין שמעון חסקי. אני העוזר החכם של המשרד. במה אוכל לעזור?"
     else:
         business = get_business_from_supabase(clean_bot)
         if business:
             biz_name = business.get('business_name', 'העסק')
-            message_body = f"שלום, הגעתם ל{biz_name}. אנחנו לא פנויים לשיחה כרגע, אבל זמינים להזמנות כאן בוואטסאפ!"
+            greeting = f"שלום, הגעתם ל{biz_name}. אני העוזר הווירטואלי, מה תרצו להזמין היום?"
+        else:
+            resp.say("המספר אינו מחובר למערכת. להתראות.", language="he-IL")
+            resp.hangup()
+            return str(resp)
 
-    # 3. Send WhatsApp
-    if message_body:
-        try:
-            twilio_mgr.messages.create(
-                from_=f"whatsapp:{clean_bot}",
-                to=f"whatsapp:{clean_caller}",
-                body=message_body
-            )
-            logger.info(f"Missed call handled. WhatsApp sent to {clean_caller}")
-        except Exception as e:
-            logger.error(f"Error sending WhatsApp: {e}")
+    # 2. Speak greeting and open mic to listen
+    gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
+    gather.say(greeting, language='he-IL')
+    resp.append(gather)
 
-    # 4. Reject Call
+    # 3. Fallback if they say absolutely nothing
+    resp.say("לא שמעתי תגובה, נתראה בפעם הבאה.", language="he-IL")
+    resp.hangup()
+    return str(resp)
+
+
+@app.route("/voice_loop", methods=['POST'])
+def voice_loop():
+    """Handles the back-and-forth conversation after the initial greeting."""
+    caller = request.values.get('From', '')
+    bot_number = request.values.get('To', '')
+    user_speech = request.values.get('SpeechResult', '') 
+    
+    clean_bot = bot_number.replace("whatsapp:", "")
+    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").strip()
+
     resp = VoiceResponse()
-    resp.reject()
+
+    # If the speech-to-text failed to capture anything
+    if not user_speech:
+        resp.say("סליחה, לא הבנתי. תוכל לחזור על זה?", language="he-IL")
+        resp.redirect("/incoming")
+        return str(resp)
+
+    # 1. Send the transcribed text to the correct Gemini Agent
+    if clean_bot == clean_lawyer_env:
+        reply_text = lawyer_ai.chat(caller, user_speech)
+    else:
+        business = get_business_from_supabase(bot_number)
+        if not business:
+            resp.hangup()
+            return str(resp)
+        g.business_config = business
+        reply_text = supabase_agent.get_response(caller, user_speech, business)
+
+    # Clean up asterisks and emojis so the voice synth doesn't read them aloud
+    clean_reply = reply_text.replace("*", "").replace("🚨", "").replace("✨", "").replace("⚖️", "")
+
+    # 2. Check if the bot has saved the order/lead and is ready to hang up
+    is_done = "הפרטים נשמרו" in reply_text or "Saved" in reply_text or "הפרטים הועברו" in reply_text
+
+    if is_done:
+        # Speak the final confirmation and hang up
+        resp.say(clean_reply, language="he-IL")
+        resp.hangup()
+    else:
+        # Speak the AI's response and open the mic again to keep the loop going
+        gather = resp.gather(input='speech', action='/voice_loop', timeout=4, speechTimeout='auto', language='he-IL')
+        gather.say(clean_reply, language="he-IL")
+        resp.append(gather)
+        
+        # Fallback if they stop talking mid-conversation
+        resp.say("סיימנו, להתראות.", language="he-IL")
+        resp.hangup()
+
     return str(resp)
 
 @app.route("/", methods=['GET'])
 def health_check():
-    return "Hybrid Bot System Active 🚀", 200
+    return "Hybrid Voice & Text System Active 🚀", 200
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
