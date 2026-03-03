@@ -331,14 +331,12 @@ def incoming_voice():
             return str(resp)
 
     # 2. Speak greeting and open mic to listen (Enhanced ML, Phone Call Model, Faster Timeout)
-    gather = resp.gather(
+    gather = resp.gather(        
         input='speech', 
         action='/voice_loop', 
         timeout=2, 
         speechTimeout='auto', 
         language='he-IL', 
-        speechModel='phone_call', 
-        enhanced=True, 
         hints=HEBREW_HINTS
     )
     gather.say(greeting, language='he-IL', voice=HEBREW_VOICE)
