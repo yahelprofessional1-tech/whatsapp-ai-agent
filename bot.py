@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 import logging
-from flask import Flask, request, g
+from flask import Flask, request, g, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
@@ -115,7 +115,7 @@ class LawyerAgent:
 
         **זהות וטון:**
         אתה לא רובוט. אתה מזכיר אנושי ומקצועי.
-        דבר בעברית טבעית, חמה, ותומכת. אל תשתמש במשפטים רובוטיים.
+        דבר בעברית טבעית, חמה, ותומכת. אל תשתמש במשפטים רובוטיים. פסק את המשפטים שלך עם פסיקים ונקודות כדי שהדיבור יישמע טבעי.
         
         **שפה ומגדר (קריטי):**
         פנה למשתמש תמיד בלשון זכר כברירת מחדל (אתה, מעוניין, תרצה), אלא אם המשתמש מדבר על עצמו במפורש בלשון נקבה. לעולם אל תערבב זכר ונקבה באותו משפט.
@@ -222,7 +222,7 @@ def send_lawyer_menu(to, body, options, from_):
     return str(MessagingResponse())
 
 # ==============================================================================
-#                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS)
+#                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS WHATSAPP TEXT)
 # ==============================================================================
 
 def save_order_supabase(name: str, order_details: str, method: str, address: str, timing: str, phone: str):
@@ -287,7 +287,6 @@ def main_router():
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
     
-    # Strip everything (whatsapp: and +) to ensure perfect matching
     clean_bot_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
     clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
 
@@ -297,120 +296,38 @@ def main_router():
         return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
-#                 ZONE C: INCOMING CALLS (VOICE AI LOOP)
+#                 ZONE C: RETELL AI WEBHOOK (NEW VOICE CALL ORDERS)
 # ==============================================================================
 
-@app.route("/incoming", methods=['POST'])
-def incoming_voice():
-    """Handles the initial phone call and greets the user."""
-    caller = request.values.get('From', '') 
-    bot_number = request.values.get('To', '')
-    
-    clean_caller = caller.replace("whatsapp:", "").replace("+", "").strip()
-    clean_bot = bot_number.replace("whatsapp:", "").replace("+", "").strip()
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
-
-    resp = VoiceResponse()
-    
-    # Premium Israeli Male Voice & Advanced Speech Recognition Hints
-    HEBREW_VOICE = 'Google.he-IL-Wavenet-B'
-    HEBREW_HINTS = "גירושין, משמורת, עורך דין, חסקי, תביעה, ילדים, הסכם, ממון, צוואה, ירושה, פגישה, שלום, כן, לא, תודה"
-
-    # 1. Determine which business they called
-    if clean_bot == clean_lawyer_env:
-        greeting = "שלום, הגעתם למשרד עורך דין שמעון חסקי. אני העוזר החכם של המשרד. במה אוכל לעזור?"
-    else:
-        business = get_business_from_supabase(clean_bot)
-        if business:
-            biz_name = business.get('business_name', 'העסק')
-            greeting = f"שלום, הגעתם ל{biz_name}. אני העוזר הווירטואלי, מה תרצו להזמין היום?"
-        else:
-            # If the phone number isn't found in the Supabase clients table
-            resp.say("המספר אינו מחובר למערכת. להתראות.", language="he-IL", voice=HEBREW_VOICE)
-            resp.hangup()
-            return str(resp)
-
-    # 2. Speak greeting and open mic to listen (Enhanced ML, Phone Call Model, Faster Timeout)
-    gather = resp.gather(        
-        input='speech', 
-        action='/voice_loop', 
-        timeout=2, 
-        speechTimeout='auto', 
-        language='he-IL', 
-        hints=HEBREW_HINTS
-    )
-    gather.say(greeting, language='he-IL', voice=HEBREW_VOICE)
-    resp.append(gather)
-
-    # 3. Fallback if they say absolutely nothing
-    resp.say("לא שמעתי תגובה, נתראה בפעם הבאה.", language="he-IL", voice=HEBREW_VOICE)
-    resp.hangup()
-    return str(resp)
-
-
-@app.route("/voice_loop", methods=['POST'])
-def voice_loop():
-    """Handles the back-and-forth conversation after the initial greeting."""
-    caller = request.values.get('From', '')
-    bot_number = request.values.get('To', '')
-    user_speech = request.values.get('SpeechResult', '') 
-    
-    clean_bot = bot_number.replace("whatsapp:", "").replace("+", "").strip()
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
-
-    resp = VoiceResponse()
-    
-    # Premium Israeli Male Voice & Advanced Speech Recognition Hints
-    HEBREW_VOICE = 'Google.he-IL-Wavenet-B'
-    HEBREW_HINTS = "גירושין, משמורת, עורך דין, חסקי, תביעה, ילדים, הסכם, ממון, צוואה, ירושה, פגישה, שלום, כן, לא, תודה"
-
-    # If the speech-to-text failed to capture anything
-    if not user_speech:
-        resp.say("סליחה, לא הבנתי. תוכל לחזור על זה?", language="he-IL", voice=HEBREW_VOICE)
-        resp.redirect("/incoming")
-        return str(resp)
-
-    # 1. Send the transcribed text to the correct Gemini Agent
-    if clean_bot == clean_lawyer_env:
-        reply_text = lawyer_ai.chat(caller, user_speech)
-    else:
-        business = get_business_from_supabase(clean_bot)
-        if not business:
-            resp.hangup()
-            return str(resp)
-        g.business_config = business
-        reply_text = supabase_agent.get_response(caller, user_speech, business)
-
-    # Clean up asterisks and emojis so the voice synth doesn't read them aloud
-    clean_reply = reply_text.replace("*", "").replace("🚨", "").replace("✨", "").replace("⚖️", "")
-
-    # 2. Check if the bot has saved the order/lead and is ready to hang up
-    is_done = "הפרטים נשמרו" in reply_text or "Saved" in reply_text or "הפרטים הועברו" in reply_text
-
-    if is_done:
-        # Speak the final confirmation and hang up
-        resp.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
-        resp.hangup()
-    else:
-        # Speak the AI's response and open the mic again to keep the loop going (Enhanced ML, Phone Call Model, Faster Timeout)
-        gather = resp.gather(
-            input='speech', 
-            action='/voice_loop', 
-            timeout=2, 
-            speechTimeout='auto', 
-            language='he-IL', 
-            speechModel='phone_call', 
-            enhanced=True, 
-            hints=HEBREW_HINTS
-        )
-        gather.say(clean_reply, language="he-IL", voice=HEBREW_VOICE)
-        resp.append(gather)
+@app.route("/retell-webhook", methods=['POST'])
+def retell_webhook():
+    """Retell AI triggers this endpoint when a voice call order is complete."""
+    try:
+        data = request.get_json()
+        args = data.get('args', {})
         
-        # Fallback if they stop talking mid-conversation
-        resp.say("סיימנו, להתראות.", language="he-IL", voice=HEBREW_VOICE)
-        resp.hangup()
-
-    return str(resp)
+        name = args.get('name', 'לא צוין')
+        order_details = args.get('order_details', 'לא צוין')
+        address = args.get('address', 'לא צוין')
+        
+        working_bot_number = "whatsapp:+97223723780" 
+        business = get_business_from_supabase(working_bot_number)
+        
+        if business and twilio_mgr:
+            owner_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
+            body = f"☎️ *הזמנה קולית חדשה (משיחת טלפון)!*\n👤 שם: {name}\n🥩 הזמנה: {order_details}\n📍 כתובת/איסוף: {address}"
+            
+            twilio_mgr.messages.create(
+                from_=working_bot_number,
+                body=body, 
+                to=owner_phone
+            )
+            
+        return jsonify({"status": "success", "message": "ההזמנה נשלחה לבעל העסק בהצלחה."})
+        
+    except Exception as e:
+        logger.error(f"Retell Webhook Error: {e}")
+        return jsonify({"status": "error", "message": "שגיאה במערכת."})
 
 @app.route("/", methods=['GET'])
 def health_check():
