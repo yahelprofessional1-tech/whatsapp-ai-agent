@@ -263,20 +263,42 @@ class SupabaseAgent:
 supabase_agent = SupabaseAgent()
 
 def get_business_from_supabase(bot_number):
+    """Helper function for Zone C to grab business info safely."""
     if not supabase: return None
-    clean = bot_number if bot_number.startswith("whatsapp:") else f"whatsapp:{bot_number}"
-    res = supabase.table('clients').select("*").eq('phone_number', clean).execute()
-    return res.data[0] if res.data else None
+    clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
+    search_format = f"whatsapp:+{clean_num}"
+    try:
+        res = supabase.table('clients').select("*").eq('phone_number', search_format).execute()
+        return res.data[0] if res.data else None
+    except:
+        return None
 
 def handle_supabase_flow(sender, msg, bot_number):
-    business = get_business_from_supabase(bot_number)
-    
-    # SMART ERROR: If Supabase doesn't recognize the number, it tells you exactly what to fix!
-    if not business: 
+    # 1. Check if Supabase is even connected
+    if not supabase:
         resp = MessagingResponse()
-        resp.message("❌ מערכת: לא מצאתי את העסק במסד הנתונים. בדוק ב-Supabase שהמספר בעמודה phone_number כתוב בדיוק כך: whatsapp:+97223723780")
+        resp.message("❌ שגיאה קריטית: הבוט עיוור. חסרים משתני הסביבה SUPABASE_URL ו-SUPABASE_KEY בשרת Render שלכם!")
+        return str(resp)
+    
+    # 2. Bulletproof formatting (strips ALL hidden characters and spaces)
+    clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
+    search_format = f"whatsapp:+{clean_num}"
+    
+    try:
+        res = supabase.table('clients').select("*").eq('phone_number', search_format).execute()
+    except Exception as e:
+        resp = MessagingResponse()
+        resp.message(f"❌ שגיאת תקשורת מול מסד הנתונים: {str(e)}")
         return str(resp)
         
+    # 3. Check if we found the business
+    if not res.data: 
+        resp = MessagingResponse()
+        resp.message(f"❌ לא מצאתי התאמה. בדוק שאין רווחים נסתרים בטבלה. אני מחפש בדיוק את המחרוזת הזו:\n{search_format}")
+        return str(resp)
+        
+    # 4. If we found it, run the AI!
+    business = res.data[0]
     g.business_config = business
     reply = supabase_agent.get_response(sender, msg, business)
     resp = MessagingResponse()
