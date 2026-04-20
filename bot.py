@@ -39,7 +39,7 @@ if GOOGLE_API_KEY:
 twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 
 # ==============================================================================
-#                 ZONE A: THE LAWYER BOT (EMPATHETIC CONFIRMATION)
+#                 ZONE A: THE LAWYER BOT (ON HOLD - NOT ROUTED)
 # ==============================================================================
 
 lawyer_sessions = {}
@@ -270,7 +270,13 @@ def get_business_from_supabase(bot_number):
 
 def handle_supabase_flow(sender, msg, bot_number):
     business = get_business_from_supabase(bot_number)
-    if not business: return str(MessagingResponse()) 
+    
+    # SMART ERROR: If Supabase doesn't recognize the number, it tells you exactly what to fix!
+    if not business: 
+        resp = MessagingResponse()
+        resp.message("❌ מערכת: לא מצאתי את העסק במסד הנתונים. בדוק ב-Supabase שהמספר בעמודה phone_number כתוב בדיוק כך: whatsapp:+97223723780")
+        return str(resp)
+        
     g.business_config = business
     reply = supabase_agent.get_response(sender, msg, business)
     resp = MessagingResponse()
@@ -287,13 +293,8 @@ def main_router():
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
     
-    clean_bot_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
-    clean_lawyer_env = (LAWYER_NUMBER_ENV or "").replace("whatsapp:", "").replace("+", "").strip()
-
-    if clean_bot_num == clean_lawyer_env:
-        return handle_lawyer_flow(sender, incoming_msg, bot_number)
-    else:
-        return handle_supabase_flow(sender, incoming_msg, bot_number)
+    # FORCING BUTCHER SHOP MODE: Ignore the lawyer logic entirely for now.
+    return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
 #                 ZONE C: RETELL AI WEBHOOK (NEW VOICE CALL ORDERS)
