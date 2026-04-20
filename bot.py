@@ -253,9 +253,11 @@ class SupabaseAgent:
         
         try:
             return self.chats[chat_id].send_message(msg).text
-        except:
-            del self.chats[chat_id]
-            return "תקלה רגעית, נסה שוב."
+        except Exception as e:
+            if chat_id in self.chats:
+                del self.chats[chat_id]
+            # MAGIC FIX: Instead of a generic error, text us the exact API crash reason!
+            return f"🤖 שגיאת מודל AI:\n{str(e)}"
 
 supabase_agent = SupabaseAgent()
 
@@ -264,7 +266,6 @@ def get_business_from_supabase(bot_number):
     if not supabase: return None
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
     try:
-        # MAGIC FIX: ilike searches for the number ANYWHERE in the text, ignoring spaces/formatting.
         res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
         return res.data[0] if res.data else None
     except:
@@ -279,7 +280,6 @@ def handle_supabase_flow(sender, msg, bot_number):
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
     
     try:
-        # MAGIC FIX: ilike instead of eq.
         res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
     except Exception as e:
         resp = MessagingResponse()
