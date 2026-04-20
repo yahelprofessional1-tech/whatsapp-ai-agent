@@ -67,7 +67,6 @@ class LawyerConfig:
         "FINISH_BOOKING": { "message": "העברתי בקשה למזכירות לתיאום פגישה, נחזור אליך בהקדם.", "action": "book_meeting" }
     }
 
-# --- Helper: Auto-Fix Phone Number ---
 def ensure_whatsapp_prefix(phone):
     if not phone: return None
     clean = phone.strip()
@@ -75,7 +74,6 @@ def ensure_whatsapp_prefix(phone):
         return f"whatsapp:{clean}"
     return clean
 
-# Tool: Save Case 
 def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown", classification: str = "NEW_LEAD"):
     try:
         real_sender = request.values.get('From', '')
@@ -95,7 +93,6 @@ def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown
             
     except Exception as e: return f"Error: {e}"
 
-# Tool: Book Meeting
 def book_meeting_tool(client_name: str, reason: str):
     target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
     if twilio_mgr and target_phone:
@@ -263,41 +260,37 @@ class SupabaseAgent:
 supabase_agent = SupabaseAgent()
 
 def get_business_from_supabase(bot_number):
-    """Helper function for Zone C to grab business info safely."""
+    """Helper function for Zone C to grab business info safely using FUZZY SEARCH."""
     if not supabase: return None
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
-    search_format = f"whatsapp:+{clean_num}"
     try:
-        res = supabase.table('clients').select("*").eq('phone_number', search_format).execute()
+        # MAGIC FIX: ilike searches for the number ANYWHERE in the text, ignoring spaces/formatting.
+        res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
         return res.data[0] if res.data else None
     except:
         return None
 
 def handle_supabase_flow(sender, msg, bot_number):
-    # 1. Check if Supabase is even connected
     if not supabase:
         resp = MessagingResponse()
         resp.message("❌ שגיאה קריטית: הבוט עיוור. חסרים משתני הסביבה SUPABASE_URL ו-SUPABASE_KEY בשרת Render שלכם!")
         return str(resp)
     
-    # 2. Bulletproof formatting (strips ALL hidden characters and spaces)
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
-    search_format = f"whatsapp:+{clean_num}"
     
     try:
-        res = supabase.table('clients').select("*").eq('phone_number', search_format).execute()
+        # MAGIC FIX: ilike instead of eq.
+        res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
     except Exception as e:
         resp = MessagingResponse()
         resp.message(f"❌ שגיאת תקשורת מול מסד הנתונים: {str(e)}")
         return str(resp)
         
-    # 3. Check if we found the business
     if not res.data: 
         resp = MessagingResponse()
-        resp.message(f"❌ לא מצאתי התאמה. בדוק שאין רווחים נסתרים בטבלה. אני מחפש בדיוק את המחרוזת הזו:\n{search_format}")
+        resp.message(f"❌ לא מצאתי התאמה. הנה המספר הנקי שחיפשתי: {clean_num}")
         return str(resp)
         
-    # 4. If we found it, run the AI!
     business = res.data[0]
     g.business_config = business
     reply = supabase_agent.get_response(sender, msg, business)
@@ -315,7 +308,7 @@ def main_router():
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
     
-    # FORCING BUTCHER SHOP MODE: Ignore the lawyer logic entirely for now.
+    # FORCING BUTCHER SHOP MODE
     return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
@@ -333,7 +326,7 @@ def retell_webhook():
         order_details = args.get('order_details', 'לא צוין')
         address = args.get('address', 'לא צוין')
         
-        working_bot_number = "whatsapp:+97223723780" 
+        working_bot_number = "97223723780" 
         business = get_business_from_supabase(working_bot_number)
         
         if business and twilio_mgr:
@@ -341,7 +334,7 @@ def retell_webhook():
             body = f"☎️ *הזמנה קולית חדשה (משיחת טלפון)!*\n👤 שם: {name}\n🥩 הזמנה: {order_details}\n📍 כתובת/איסוף: {address}"
             
             twilio_mgr.messages.create(
-                from_=working_bot_number,
+                from_=f"whatsapp:+{working_bot_number}",
                 body=body, 
                 to=owner_phone
             )
