@@ -1,8 +1,11 @@
 import os
 import json
+import datetime
 import logging
+import re
 from flask import Flask, request, g, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -41,10 +44,13 @@ twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
 # ==============================================================================
 
 lawyer_sessions = {}
+last_auto_replies = {} 
 
 class LawyerConfig:
     BUSINESS_NAME = "Adv. Shimon Hasky"
     LAWYER_PHONE = os.getenv('LAWYER_PHONE') # חזקי
+    VIP_NUMBERS = [LAWYER_PHONE]
+    COOL_DOWN_HOURS = 24
     
     FLOW_STATES = {
         "START": {
@@ -101,11 +107,55 @@ def book_meeting_tool(client_name: str, reason: str):
 class LawyerAgent:
     def __init__(self):
         self.tools = [save_case_summary, book_meeting_tool]
+        
         self.system_instruction = f"""
         אתה עוזר הקבלה של {LawyerConfig.BUSINESS_NAME}.
-        **זהות וטון:** אתה לא רובוט. אתה מזכיר אנושי ומקצועי.
-        **המטרה שלך:** קבל שם, הבן בעיה משפטית, ושמור את התיק.
-        אם הלקוח מאשר את הסיכום -> קרא מיד לפונקציה save_case_summary.
+
+        **זהות וטון:**
+        אתה לא רובוט. אתה מזכיר אנושי ומקצועי.
+        דבר בעברית טבעית, חמה, ותומכת. אל תשתמש במשפטים רובוטיים. פסק את המשפטים שלך עם פסיקים ונקודות כדי שהדיבור יישמע טבעי.
+        
+        **שפה ומגדר (קריטי):**
+        פנה למשתמש תמיד בלשון זכר כברירת מחדל (אתה, מעוניין, תרצה), אלא אם המשתמש מדבר על עצמו במפורש בלשון נקבה. לעולם אל תערבב זכר ונקבה באותו משפט.
+
+        **המטרה שלך (לפי סדר עדיפויות):**
+        1. אם הלקוח שאל שאלה - ענה קצר וישיר (1-2 משפטים).
+        2. קבל שם מלא של הלקוח.
+        3. הבן את הבעיה המשפטית.
+        4. סווג ושמור את התיק.
+
+        **תהליך השיחה - עקוב בדיוק:**
+
+        📍 **שלב 1: אמפתיה ראשונית**
+        אם הלקוח מביע כאב/מצוקה/פחד, התחל עם מילות תמיכה והקשבה.
+
+        📍 **שלב 2: תשובה לשאלה (אם יש)**
+        כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים. "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה".
+
+        📍 **שלב 3: קבלת שם**
+        אם אין לך שם עדיין, פשוט שאל לשמו המלא.
+   
+        📍 **שלב 4: הבנת הבעיה**
+        שאל שאלה אחת ממוקדת כדי להבין את המקרה.
+
+        📍 **שלב 5: סיכום ואישור (פעם אחת בלבד!)**
+        לפני שאתה שומר את התיק, סכם ללקוח את מה שהבנת.
+        השתמש בדיוק במבנה הבא:
+        1. "אז אני מבין ש..." (סיכום המקרה).
+        2. סיום עם השאלה: **"האם תרצה להוסיף עוד פרטים לפני שאעביר את ההודעה?"**
+
+        **כלל ברזל למניעת לולאות:** שאל את שאלת האישור הזו **פעם אחת ויחידה**. 
+        אם הלקוח עונה "לא", "זהו", או מאשר --> קרא מיד לפונקציה `save_case_summary`.
+        אם הלקוח מאשר אך מוסיף פרט קטן --> הוסף את המידע לסיכום הפנימי שלך וקרא **מיד** לפונקציה `save_case_summary`. **בשום אופן אל תשאל שוב!**
+
+        **חוקי סיווג (CLASSIFICATION):**
+        🔥 "URGENT" - מילות חירום: דחוף, משטרה, אלימות.
+        📁 "EXISTING" - קשר קיים: התיק שלי, הדיון שלי.
+        ✨ "NEW_LEAD" - פנייה ראשונה: רוצה להתגרש, כמה עולה.
+
+        **טיפול בשגיאות:**
+        אם הפונקציה החזירה "Saved" - תגיד רק:
+        "הפרטים נשמרו והועברו לעו"ד חסקי."
         """
         self.model = genai.GenerativeModel('gemini-2.5-flash', tools=self.tools, system_instruction=self.system_instruction)
         self.chats = {}
@@ -189,21 +239,41 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
 
         # Beautiful Hebrew Formatting for the Boss (Master Phone)
         body = (
-            f"🚨 *הזמנה חדשה התקבלה!* 🚨\n\n"
+            f"🚨 *הזמנה התקבלה / עודכנה!* 🚨\n\n"
             f"👤 *לקוח:* {name}\n"
             f"🥩 *פירוט:* {order_details}\n"
             f"🛍️ *איסוף/משלוח:* {method}\n"
             f"📍 *כתובת:* {address}\n"
             f"⏰ *שעה מבוקשת:* {timing}\n\n"
-            f"💬 *לחץ כאן כדי לאשר ולסגור תשלום מול הלקוח:* \n{wa_link}"
+            f"💬 *לחץ כאן ליצירת קשר עם הלקוח:* \n{wa_link}"
         )
 
+        # 1. Send WhatsApp to Boss
         if twilio_mgr and owner_phone:
              twilio_mgr.messages.create(
                  from_=bot_number,
                  to=owner_phone,
                  body=body
              )
+             
+        # 2. Save directly to Supabase DB (Replaces Google Sheets need)
+        if supabase:
+            try:
+                order_data = {
+                    "business_phone": bot_number,
+                    "client_name": name,
+                    "client_phone": clean_phone,
+                    "order_details": order_details,
+                    "delivery_method": method,
+                    "address": address,
+                    "timing": timing,
+                    "status": "new"
+                }
+                # This safely attempts to insert. If you haven't made the 'orders' table yet, it safely ignores it.
+                supabase.table('orders').insert(order_data).execute()
+            except Exception as db_err:
+                logger.error(f"Failed to save to DB (Table might not exist yet): {db_err}")
+
         return "ההזמנה נשמרה בהצלחה והועברה לקצב."
     except Exception as e: 
         return f"Error: {e}"
@@ -214,13 +284,34 @@ class SupabaseAgent:
 
     def get_response(self, user_phone, msg, config):
         chat_id = f"{config['phone_number']}_{user_phone}"
+        
         if chat_id not in self.chats or msg.lower() == "reset":
             sys_instruct = config.get('system_instruction', 'You are a helpful assistant.')
+            
+            # --- 1. TIME INJECTION (ISRAEL TIME) ---
+            israel_time = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+            time_str = israel_time.strftime("%d/%m/%Y %H:%M")
+            sys_instruct += f"\n\n[מידע מערכת חסוי: התאריך והשעה כרגע בישראל: {time_str}.]"
+            
+            # --- 2. THE GOD-MODE OVERRIDE (Fixes the "Cannot Modify" hallucination) ---
+            sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
+
             model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
         
         try:
-            return self.chats[chat_id].send_message(msg).text
+            raw_reply = self.chats[chat_id].send_message(msg).text
+            
+            # --- 3. THE THOUGHT CLEANER ---
+            # Strips out any internal English reasoning before sending to WhatsApp
+            clean_reply = re.sub(r'(?is)THOUGHT:.*?(?:\n\n|\n(?=[א-ת]))', '', raw_reply).strip()
+            
+            # Fallback just in case the regex wipes everything
+            if not clean_reply and raw_reply:
+                clean_reply = raw_reply
+                
+            return clean_reply
+            
         except Exception as e:
             if chat_id in self.chats:
                 del self.chats[chat_id]
@@ -229,6 +320,7 @@ class SupabaseAgent:
 supabase_agent = SupabaseAgent()
 
 def get_business_from_supabase(bot_number):
+    """Helper function for Zone C to grab business info safely using FUZZY SEARCH."""
     if not supabase: return None
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
     try:
@@ -240,7 +332,7 @@ def get_business_from_supabase(bot_number):
 def handle_supabase_flow(sender, msg, bot_number):
     if not supabase:
         resp = MessagingResponse()
-        resp.message("❌ שגיאה קריטית: חסרים משתני הסביבה בשרת Render!")
+        resp.message("❌ שגיאה קריטית: הבוט עיוור. חסרים משתני הסביבה SUPABASE_URL ו-SUPABASE_KEY בשרת Render שלכם!")
         return str(resp)
     
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
@@ -249,12 +341,12 @@ def handle_supabase_flow(sender, msg, bot_number):
         res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
     except Exception as e:
         resp = MessagingResponse()
-        resp.message(f"❌ שגיאת מסד נתונים: {str(e)}")
+        resp.message(f"❌ שגיאת תקשורת מול מסד הנתונים: {str(e)}")
         return str(resp)
         
     if not res.data: 
         resp = MessagingResponse()
-        resp.message(f"❌ לא מצאתי התאמה למספר: {clean_num}")
+        resp.message(f"❌ לא מצאתי התאמה. הנה המספר הנקי שחיפשתי: {clean_num}")
         return str(resp)
         
     business = res.data[0]
@@ -283,6 +375,7 @@ def main_router():
 
 @app.route("/retell-webhook", methods=['POST'])
 def retell_webhook():
+    """Retell AI triggers this endpoint when a voice call order is complete."""
     try:
         data = request.get_json()
         args = data.get('args', {})
@@ -304,7 +397,7 @@ def retell_webhook():
                 to=owner_phone
             )
             
-        return jsonify({"status": "success", "message": "ההזמנה נשלחה בהצלחה."})
+        return jsonify({"status": "success", "message": "ההזמנה נשלחה לבעל העסק בהצלחה."})
         
     except Exception as e:
         logger.error(f"Retell Webhook Error: {e}")
