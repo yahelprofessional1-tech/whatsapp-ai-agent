@@ -248,7 +248,7 @@ class SupabaseAgent:
         chat_id = f"{config['phone_number']}_{user_phone}"
         if chat_id not in self.chats or msg.lower() == "reset":
             sys_instruct = config.get('system_instruction', 'You are a helpful assistant.')
-            model = genai.GenerativeModel('gemini-2.0-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
+            model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
         
         try:
