@@ -403,6 +403,75 @@ def retell_webhook():
         logger.error(f"Retell Webhook Error: {e}")
         return jsonify({"status": "error", "message": "שגיאה במערכת."})
 
+# ==============================================================================
+#                 ZONE D: WEBSITE CHECKOUT API
+# ==============================================================================
+
+@app.route("/api/web-order", methods=['POST', 'OPTIONS'])
+def web_order():
+    # 1. Handle CORS (This allows your Next.js site to talk to your Flask server safely)
+    if request.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST",
+            "Access-Control-Allow-Headers": "Content-Type"
+        }
+        return ('', 204, headers)
+        
+    try:
+        data = request.get_json()
+        customer = data.get('customer', {})
+        items = data.get('items', [])
+        
+        # 2. Format the beautiful Hebrew receipt for you (The Boss)
+        method_text = "משלוח 🚚" if data.get('deliveryMethod') == "delivery" else "איסוף עצמי 🏬"
+        
+        msg = f"🟢 *הזמנה חדשה מהאתר!* 🟢\n"
+        msg += f"--------------------\n"
+        msg += f"שם: {customer.get('name')}\n"
+        msg += f"טלפון: {customer.get('phone')}\n"
+        msg += f"שיטה: {method_text}\n"
+        
+        if data.get('deliveryMethod') == "delivery":
+            msg += f"עיר: {customer.get('city')}\n"
+            msg += f"רחוב: {customer.get('street')} {customer.get('houseNumber')}\n"
+            if customer.get('floor'): msg += f"קומה: {customer.get('floor')}\n"
+            if customer.get('doorCode'): msg += f"אינטרקום: {customer.get('doorCode')}\n"
+            
+        msg += f"\n*פירוט:*\n"
+        for i, item in enumerate(items):
+            p = item.get('product', {})
+            qty = item.get('quantity', 0)
+            price = p.get('price', 0) * qty
+            msg += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
+            
+        msg += f"\n*סה\"כ משוער: ₪{data.get('total', 0):.2f}*\n"
+        
+        # Creates a clickable link so you can instantly WhatsApp the customer!
+        clean_phone = customer.get('phone', '')
+        if clean_phone.startswith('0'):
+            clean_phone = '972' + clean_phone[1:]
+        msg += f"\n💬 *לחץ כאן לשליחת הודעה ללקוח:*\nhttps://wa.me/{clean_phone}"
+
+        # 3. Target your exact number! (Converted to Twilio's required format)
+        target_phone = "whatsapp:+972587742596" 
+        bot_number = "whatsapp:+97223723780" # From your existing code
+        
+        if twilio_mgr:
+            twilio_mgr.messages.create(
+                from_=bot_number,
+                to=target_phone,
+                body=msg
+            )
+            
+        headers = {"Access-Control-Allow-Origin": "*"}
+        return jsonify({"status": "success"}), 200, headers
+        
+    except Exception as e:
+        logger.error(f"Web Order Error: {e}")
+        headers = {"Access-Control-Allow-Origin": "*"}
+        return jsonify({"status": "error", "message": str(e)}), 500, headers
+
 @app.route("/", methods=['GET'])
 def health_check():
     return "Hybrid Voice & Text System Active 🚀", 200
