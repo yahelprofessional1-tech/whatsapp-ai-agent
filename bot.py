@@ -10,6 +10,7 @@ from twilio.rest import Client
 import google.generativeai as genai
 from dotenv import load_dotenv
 from supabase import create_client, Client as SupabaseClient
+import time 
 
 # --- 1. SYSTEM SETUP ---
 load_dotenv()
@@ -403,27 +404,57 @@ def retell_webhook():
         logger.error(f"Retell Webhook Error: {e}")
         return jsonify({"status": "error", "message": "שגיאה במערכת."})
 
+
+# --- SECURITY: The Bouncer's Memory ---
+ip_tracker = {}
+
 # ==============================================================================
-#                 ZONE D: WEBSITE CHECKOUT API
+#                 ZONE D: WEBSITE CHECKOUT API (SECURED)
 # ==============================================================================
 
 @app.route("/api/web-order", methods=['POST', 'OPTIONS'])
 def web_order():
-    # 1. Handle CORS (This allows your Next.js site to talk to your Flask server safely)
+    # 1. Handle CORS (Added 'X-API-KEY' to allowed headers so browsers don't block it)
     if request.method == "OPTIONS":
         headers = {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST",
-            "Access-Control-Allow-Headers": "Content-Type"
+            "Access-Control-Allow-Headers": "Content-Type, X-API-KEY"
         }
         return ('', 204, headers)
         
     try:
+        # --- SECURITY LAYER 1: THE SECRET HANDSHAKE ---
+        # If the request doesn't have this exact password, drop it immediately.
+        client_key = request.headers.get('X-API-KEY')
+        if client_key != "BUARON_SECURE_2026_MAX":
+            logger.warning(f"BLOCKED: Unauthorized access attempt from {request.remote_addr}")
+            headers = {"Access-Control-Allow-Origin": "*"}
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # --- SECURITY LAYER 2: THE BOUNCER (Rate Limiting) ---
+        # Max 3 orders per 5 minutes (300 seconds) from the same IP address
+        client_ip = request.remote_addr
+        current_time = time.time()
+        
+        if client_ip in ip_tracker:
+            requests_made, first_request_time = ip_tracker[client_ip]
+            if current_time - first_request_time < 300: 
+                if requests_made >= 3:
+                    logger.warning(f"BLOCKED: Spam detected from IP {client_ip}")
+                    headers = {"Access-Control-Allow-Origin": "*"}
+                    return jsonify({"error": "Too many requests. Wait 5 minutes."}), 429
+                ip_tracker[client_ip] = (requests_made + 1, first_request_time)
+            else:
+                ip_tracker[client_ip] = (1, current_time) # 5 minutes passed, reset their counter
+        else:
+            ip_tracker[client_ip] = (1, current_time)
+
+        # --- PROCESS THE REAL ORDER ---
         data = request.get_json()
         customer = data.get('customer', {})
         items = data.get('items', [])
         
-        # 2. Format the beautiful Hebrew receipt for you (The Boss)
         method_text = "משלוח 🚚" if data.get('deliveryMethod') == "delivery" else "איסוף עצמי 🏬"
         
         msg = f"🟢 *הזמנה חדשה מהאתר!* 🟢\n"
@@ -447,15 +478,13 @@ def web_order():
             
         msg += f"\n*סה\"כ משוער: ₪{data.get('total', 0):.2f}*\n"
         
-        # Creates a clickable link so you can instantly WhatsApp the customer!
         clean_phone = customer.get('phone', '')
         if clean_phone.startswith('0'):
             clean_phone = '972' + clean_phone[1:]
         msg += f"\n💬 *לחץ כאן לשליחת הודעה ללקוח:*\nhttps://wa.me/{clean_phone}"
 
-        # 3. Target your exact number! (Converted to Twilio's required format)
         target_phone = "whatsapp:+972587742596" 
-        bot_number = "whatsapp:+97223723780" # From your existing code
+        bot_number = "whatsapp:+97223723780" 
         
         if twilio_mgr:
             twilio_mgr.messages.create(
