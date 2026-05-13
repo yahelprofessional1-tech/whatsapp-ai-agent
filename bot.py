@@ -20,8 +20,6 @@ app = Flask(__name__)
 
 # --- GLOBAL CONFIG ---
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-TWILIO_SID = os.getenv('TWILIO_SID')
-TWILIO_TOKEN = os.getenv('TWILIO_TOKEN')
 LAWYER_NUMBER_ENV = os.getenv('LAWYER_WHATSAPP_NUMBER') 
 
 # Supabase Setup
@@ -37,8 +35,41 @@ except:
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 
-# Twilio Client
-twilio_mgr = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID else None
+
+# ==============================================================================
+#                 THE DYNAMIC TWILIO ROUTER (MULTI-TENANT)
+# ==============================================================================
+# This stores active connections in RAM so we don't query Supabase every single second
+active_twilio_clients = {}
+
+def get_dynamic_twilio_client(bot_number):
+    """Pulls the exact Twilio Client for the specific business being texted."""
+    clean_num = str(bot_number).replace("whatsapp:", "").replace("+", "").strip()
+    
+    # 1. Check if we already have it in RAM
+    if clean_num in active_twilio_clients:
+        return active_twilio_clients[clean_num]
+        
+    # 2. If not, ask Supabase for the keys
+    if supabase:
+        try:
+            res = supabase.table('clients').select("*").ilike('phone_number', f'%{clean_num}%').execute()
+            if res.data and len(res.data) > 0:
+                business = res.data[0]
+                sid = business.get('twilio_sid')
+                token = business.get('twilio_token')
+                
+                # If the DB has keys, build the client and save to RAM
+                if sid and token:
+                    client = Client(sid, token)
+                    active_twilio_clients[clean_num] = client
+                    return client
+                else:
+                    logger.error(f"Missing SID or Token in Supabase for {clean_num}")
+        except Exception as e:
+            logger.error(f"Failed to load Twilio client for {clean_num}: {e}")
+            
+    return None
 
 # ==============================================================================
 #                 ZONE A: THE LAWYER BOT (ON HOLD - NOT ROUTED)
@@ -78,6 +109,9 @@ def ensure_whatsapp_prefix(phone):
 
 def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown", classification: str = "NEW_LEAD"):
     try:
+        bot_number = request.values.get('To')
+        client = get_dynamic_twilio_client(bot_number)
+        
         real_sender = request.values.get('From', '')
         clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
@@ -87,19 +121,22 @@ def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown
         
         target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
         
-        if twilio_mgr and target_phone:
-            twilio_mgr.messages.create(from_=request.values.get('To'), body=body, to=target_phone)
+        if client and target_phone:
+            client.messages.create(from_=bot_number, body=body, to=target_phone)
             return f"SAVED as {classification}."
         else:
-            return f"SAVED as {classification} (Note: Lawyer phone not configured)."
+            return f"SAVED as {classification} (Note: Lawyer phone or Client not configured)."
             
     except Exception as e: return f"Error: {e}"
 
 def book_meeting_tool(client_name: str, reason: str):
+    bot_number = request.values.get('To')
+    client = get_dynamic_twilio_client(bot_number)
     target_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
-    if twilio_mgr and target_phone:
-         twilio_mgr.messages.create(
-             from_=request.values.get('To'),
+    
+    if client and target_phone:
+         client.messages.create(
+             from_=bot_number,
              body=f"📅 *בקשה לפגישה*\nלקוח: {client_name}\nסיבה: {reason}",
              to=target_phone
          )
@@ -207,17 +244,22 @@ def handle_lawyer_flow(sender, incoming_msg, bot_number):
     return send_lawyer_msg(sender, reply, bot_number)
 
 def send_lawyer_msg(to, body, from_):
-    twilio_mgr.messages.create(from_=from_, body=body, to=to)
+    client = get_dynamic_twilio_client(from_)
+    if client:
+        client.messages.create(from_=from_, body=body, to=to)
     return str(MessagingResponse())
 
 def send_lawyer_menu(to, body, options, from_):
+    client = get_dynamic_twilio_client(from_)
+    if not client: return str(MessagingResponse())
+    
     try:
         rows = [{"id": opt["label"], "title": opt["label"][:24]} for opt in options]
         payload = {"type": "list", "header": {"type": "text", "text": "תפריט"}, "body": {"text": body}, "action": {"button": "בחירה", "sections": [{"title": "אפשרויות", "rows": rows}]}}
-        twilio_mgr.messages.create(from_=from_, to=to, body=body, persistent_action=[json.dumps(payload)])
+        client.messages.create(from_=from_, to=to, body=body, persistent_action=[json.dumps(payload)])
     except:
         opts_text = "\n".join([f"{i+1}. {opt['label']}" for i, opt in enumerate(options)])
-        twilio_mgr.messages.create(from_=from_, to=to, body=f"{body}\n{opts_text}")
+        client.messages.create(from_=from_, to=to, body=f"{body}\n{opts_text}")
     return str(MessagingResponse())
 
 # ==============================================================================
@@ -232,6 +274,9 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         owner_phone = ensure_whatsapp_prefix(owner_phone)
+
+        # GET DYNAMIC CLIENT
+        client = get_dynamic_twilio_client(bot_number)
 
         # FOOLPROOF FIX: Grab the EXACT phone number from Twilio's HTTP request
         real_sender = request.values.get('From', '')
@@ -250,8 +295,8 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         )
 
         # 1. Send WhatsApp to Boss
-        if twilio_mgr and owner_phone:
-             twilio_mgr.messages.create(
+        if client and owner_phone:
+             client.messages.create(
                  from_=bot_number,
                  to=owner_phone,
                  body=body
@@ -347,7 +392,7 @@ def handle_supabase_flow(sender, msg, bot_number):
         
     if not res.data: 
         resp = MessagingResponse()
-        resp.message(f"❌ לא מצאתי התאמה. הנה המספר הנקי שחיפשתי: {clean_num}")
+        resp.message(f"❌ לא מצאתי התאמה למספר הבוט: {clean_num}")
         return str(resp)
         
     business = res.data[0]
@@ -367,7 +412,7 @@ def main_router():
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
     
-    # FORCING BUTCHER SHOP MODE
+    # FORCING SUPABASE FLOW FOR ALL INCOMING NUMBERS
     return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
@@ -388,11 +433,14 @@ def retell_webhook():
         working_bot_number = "97223723780" 
         business = get_business_from_supabase(working_bot_number)
         
-        if business and twilio_mgr:
+        # GET DYNAMIC CLIENT
+        client = get_dynamic_twilio_client(working_bot_number)
+        
+        if business and client:
             owner_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
             body = f"☎️ *הזמנה קולית חדשה (משיחת טלפון)!*\n👤 שם: {name}\n🥩 הזמנה: {order_details}\n📍 כתובת/איסוף: {address}"
             
-            twilio_mgr.messages.create(
+            client.messages.create(
                 from_=f"whatsapp:+{working_bot_number}",
                 body=body, 
                 to=owner_phone
@@ -425,7 +473,6 @@ def web_order():
         
     try:
         # --- SECURITY LAYER 1: THE SECRET HANDSHAKE ---
-        # If the request doesn't have this exact password, drop it immediately.
         client_key = request.headers.get('X-API-KEY')
         if client_key != "BUARON_SECURE_2026_MAX":
             logger.warning(f"BLOCKED: Unauthorized access attempt from {request.remote_addr}")
@@ -433,7 +480,6 @@ def web_order():
             return jsonify({"error": "Unauthorized"}), 401
 
         # --- SECURITY LAYER 2: THE BOUNCER (Rate Limiting) ---
-        # Max 3 orders per 5 minutes (300 seconds) from the same IP address
         client_ip = request.remote_addr
         current_time = time.time()
         
@@ -446,7 +492,7 @@ def web_order():
                     return jsonify({"error": "Too many requests. Wait 5 minutes."}), 429
                 ip_tracker[client_ip] = (requests_made + 1, first_request_time)
             else:
-                ip_tracker[client_ip] = (1, current_time) # 5 minutes passed, reset their counter
+                ip_tracker[client_ip] = (1, current_time) 
         else:
             ip_tracker[client_ip] = (1, current_time)
 
@@ -486,12 +532,17 @@ def web_order():
         target_phone = "whatsapp:+972587742596" 
         bot_number = "whatsapp:+97223723780" 
         
-        if twilio_mgr:
-            twilio_mgr.messages.create(
+        # GET DYNAMIC CLIENT
+        client = get_dynamic_twilio_client(bot_number)
+        
+        if client:
+            client.messages.create(
                 from_=bot_number,
                 to=target_phone,
                 body=msg
             )
+        else:
+            logger.error("Could not send website order: No Twilio client found for bot number.")
             
         headers = {"Access-Control-Allow-Origin": "*"}
         return jsonify({"status": "success"}), 200, headers
