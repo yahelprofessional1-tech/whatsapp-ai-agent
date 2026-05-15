@@ -72,7 +72,7 @@ def get_dynamic_twilio_client(bot_number):
     return None
 
 # ==============================================================================
-#                 ZONE A: THE LAWYER BOT (ON HOLD - NOT ROUTED)
+#                 ZONE A: THE LAWYER BOT (TEXT)
 # ==============================================================================
 
 lawyer_sessions = {}
@@ -262,6 +262,7 @@ def send_lawyer_menu(to, body, options, from_):
         client.messages.create(from_=from_, to=to, body=f"{body}\n{opts_text}")
     return str(MessagingResponse())
 
+
 # ==============================================================================
 #                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS WHATSAPP TEXT)
 # ==============================================================================
@@ -302,7 +303,7 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
                  body=body
              )
              
-        # 2. Save directly to Supabase DB (Replaces Google Sheets need)
+        # 2. Save directly to Supabase DB
         if supabase:
             try:
                 order_data = {
@@ -315,7 +316,6 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
                     "timing": timing,
                     "status": "new"
                 }
-                # This safely attempts to insert. If you haven't made the 'orders' table yet, it safely ignores it.
                 supabase.table('orders').insert(order_data).execute()
             except Exception as db_err:
                 logger.error(f"Failed to save to DB (Table might not exist yet): {db_err}")
@@ -339,7 +339,7 @@ class SupabaseAgent:
             time_str = israel_time.strftime("%d/%m/%Y %H:%M")
             sys_instruct += f"\n\n[מידע מערכת חסוי: התאריך והשעה כרגע בישראל: {time_str}.]"
             
-            # --- 2. THE GOD-MODE OVERRIDE (Fixes the "Cannot Modify" hallucination) ---
+            # --- 2. THE GOD-MODE OVERRIDE ---
             sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
 
             model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
@@ -347,12 +347,9 @@ class SupabaseAgent:
         
         try:
             raw_reply = self.chats[chat_id].send_message(msg).text
-            
-            # --- 3. THE THOUGHT CLEANER ---
             # Strips out any internal English reasoning before sending to WhatsApp
             clean_reply = re.sub(r'(?is)THOUGHT:.*?(?:\n\n|\n(?=[א-ת]))', '', raw_reply).strip()
             
-            # Fallback just in case the regex wipes everything
             if not clean_reply and raw_reply:
                 clean_reply = raw_reply
                 
@@ -366,7 +363,6 @@ class SupabaseAgent:
 supabase_agent = SupabaseAgent()
 
 def get_business_from_supabase(bot_number):
-    """Helper function for Zone C to grab business info safely using FUZZY SEARCH."""
     if not supabase: return None
     clean_num = bot_number.replace("whatsapp:", "").replace("+", "").strip()
     try:
@@ -412,45 +408,137 @@ def main_router():
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '') 
     
-    # FORCING SUPABASE FLOW FOR ALL INCOMING NUMBERS
     return handle_supabase_flow(sender, incoming_msg, bot_number)
 
 # ==============================================================================
-#                 ZONE C: RETELL AI WEBHOOK (NEW VOICE CALL ORDERS)
+#                 ZONE C: RETELL AI WEBHOOK (POST-CALL TRANSCRIPTS)
 # ==============================================================================
 
 @app.route("/retell-webhook", methods=['POST'])
 def retell_webhook():
-    """Retell AI triggers this endpoint when a voice call order is complete."""
+    """Retell AI triggers this endpoint when a voice call is completely finished."""
     try:
         data = request.get_json()
-        args = data.get('args', {})
+        event = data.get('event')
         
-        name = args.get('name', 'לא צוין')
-        order_details = args.get('order_details', 'לא צוין')
-        address = args.get('address', 'לא צוין')
-        
-        working_bot_number = "97223723780" 
-        business = get_business_from_supabase(working_bot_number)
-        
-        # GET DYNAMIC CLIENT
-        client = get_dynamic_twilio_client(working_bot_number)
-        
-        if business and client:
-            owner_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
-            body = f"☎️ *הזמנה קולית חדשה (משיחת טלפון)!*\n👤 שם: {name}\n🥩 הזמנה: {order_details}\n📍 כתובת/איסוף: {address}"
+        # We only care about the end of the call
+        if event == "call_analyzed":
+            call = data.get('call', {})
+            agent_id = call.get('agent_id')
             
-            client.messages.create(
-                from_=f"whatsapp:+{working_bot_number}",
-                body=body, 
-                to=owner_phone
-            )
+            # --- EXTRACT THE ANALYSIS ---
+            transcript = call.get('transcript', 'לא זמין')
+            call_summary = call.get('call_analysis', {}).get('call_summary', 'לא זמין')
+            user_phone = call.get('from_number', 'Unknown')
             
-        return jsonify({"status": "success", "message": "ההזמנה נשלחה לבעל העסק בהצלחה."})
+            # 1. IS IT THE BUTCHER BOT?
+            # TODO: Replace YOUR_BUTCHER_AGENT_ID with the actual Retell Agent ID
+            if agent_id == "YOUR_BUTCHER_AGENT_ID":
+                working_bot_number = "97223723780"
+                business = get_business_from_supabase(working_bot_number)
+                client = get_dynamic_twilio_client(working_bot_number)
+                
+                custom_data = call.get('custom_analysis_data', {})
+                name = custom_data.get('name', 'לקוח קולי')
+                order_details = custom_data.get('order_details', call_summary)
+                
+                if business and client:
+                    owner_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
+                    body = f"☎️ *סיכום שיחת הזמנה!*\n👤 מטלפון: {user_phone}\n🥩 סיכום שיחה: {order_details}"
+                    client.messages.create(from_=f"whatsapp:+{working_bot_number}", body=body, to=owner_phone)
+
+            # 2. IS IT THE LAWYER BOT?
+            # TODO: Replace YOUR_LAWYER_AGENT_ID with the actual Retell Agent ID
+            elif agent_id == "YOUR_LAWYER_AGENT_ID":
+                lawyer_bot_number = "972XXXXXXXXX" # TODO: Put Lawyer's Twilio Number here
+                boss_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+                client = get_dynamic_twilio_client(lawyer_bot_number)
+                
+                if client:
+                    msg = (
+                        f"⚖️ *שיחה נכנסת חדשה (בוט קולי)* ⚖️\n\n"
+                        f"📱 מטלפון: {user_phone}\n\n"
+                        f"📝 *סיכום ה-AI:*\n{call_summary}\n\n"
+                        f"📄 *תמלול מלא:*\n{transcript}"
+                    )
+                    client.messages.create(from_=f"whatsapp:+{lawyer_bot_number}", body=msg, to=boss_phone)
+
+        return jsonify({"status": "success"}), 200
         
     except Exception as e:
         logger.error(f"Retell Webhook Error: {e}")
-        return jsonify({"status": "error", "message": "שגיאה במערכת."})
+        return jsonify({"status": "error"}), 500
+
+# ==============================================================================
+#                 ZONE E: RETELL MID-CALL TOOLS (FUNCTION CALLING)
+# ==============================================================================
+
+@app.route("/retell-tool", methods=['POST'])
+def retell_tool_handler():
+    try:
+        data = request.get_json()
+        tool_name = data.get('name')
+        args = data.get('args', {})
+        caller_phone = data.get('call', {}).get('from_number', '') 
+        
+        # NOTE: You'll want to dynamically set this based on the business eventually.
+        bot_number = "whatsapp:+972XXXXXXXXX" # TODO: Put Lawyer's Twilio Number here
+        boss_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
+        client = get_dynamic_twilio_client(bot_number)
+
+        # --- TOOL 1: CHECK AVAILABILITY ---
+        if tool_name == "check_availability":
+            date_requested = args.get('date')
+            return jsonify({"result": f"Looked at the calendar. Yes, {date_requested} has open slots in the afternoon. Ask the user if 14:00 or 16:00 works better."})
+
+        # --- TOOL 2: BOOK APPOINTMENT ---
+        elif tool_name == "book_appointment":
+            client_name = args.get('client_name', 'לקוח לא ידוע')
+            date_time = args.get('date_time', 'מועד לא ידוע')
+            
+            if client:
+                client.messages.create(
+                    from_=bot_number,
+                    to=boss_phone,
+                    body=f"📅 *פגישה חדשה נקבעה בשיחה!*\nשם: {client_name}\nמתי: {date_time}\nטלפון: {caller_phone}"
+                )
+            return jsonify({"result": f"Successfully booked for {client_name} at {date_time}. Confirm this with the user."})
+
+        # --- TOOL 3: SEND SMS/WHATSAPP MID-CALL ---
+        elif tool_name == "send_whatsapp_link":
+            link_type = args.get('link_type') # 'intake' or 'document'
+            
+            msg = ""
+            if link_type == "intake":
+                msg = "שלום! הנה הקישור לטופס הקליטה למשרד עו\"ד שמעון חסקי: [LINK]"
+            elif link_type == "document":
+                msg = "להעלאת מסמכים מאובטחת לתיק שלך, לחץ כאן: [LINK]"
+            else:
+                msg = "שלום, להלן הקישור שביקשת מהנציג הקולי: [LINK]"
+
+            if client and caller_phone:
+                clean_caller = ensure_whatsapp_prefix(caller_phone)
+                client.messages.create(from_=bot_number, to=clean_caller, body=msg)
+                
+            return jsonify({"result": "The WhatsApp message was sent successfully. Tell the user to check their phone right now."})
+
+        # --- TOOL 4: CHECK CASE STATUS ---
+        elif tool_name == "check_case_status":
+            id_number = args.get('id_number')
+            
+            if len(id_number) > 5:
+                status = "The documents were submitted to the court yesterday, we are waiting for the judge's response."
+            else:
+                status = "I couldn't find a case with that ID number. Please ask them to verify it."
+                
+            return jsonify({"result": status})
+
+        # --- FALLBACK ---
+        return jsonify({"result": "Error: Tool not recognized."})
+
+    except Exception as e:
+        logger.error(f"Retell Tool Error: {e}")
+        return jsonify({"result": "Error occurred while executing tool."}), 500
 
 
 # --- SECURITY: The Bouncer's Memory ---
@@ -462,7 +550,6 @@ ip_tracker = {}
 
 @app.route("/api/web-order", methods=['POST', 'OPTIONS'])
 def web_order():
-    # 1. Handle CORS (Added 'X-API-KEY' to allowed headers so browsers don't block it)
     if request.method == "OPTIONS":
         headers = {
             "Access-Control-Allow-Origin": "*",
@@ -532,7 +619,6 @@ def web_order():
         target_phone = "whatsapp:+972587742596" 
         bot_number = "whatsapp:+97223723780" 
         
-        # GET DYNAMIC CLIENT
         client = get_dynamic_twilio_client(bot_number)
         
         if client:
