@@ -616,7 +616,7 @@ def web_order():
             clean_phone = '972' + clean_phone[1:]
         msg += f"\n💬 *לחץ כאן לשליחת הודעה ללקוח:*\nhttps://wa.me/{clean_phone}"
 
-        target_phone = "whatsapp:+972503636298" 
+        target_phone = "whatsapp:+972587742596" 
         bot_number = "whatsapp:+97223723780" 
         
         client = get_dynamic_twilio_client(bot_number)
