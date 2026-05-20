@@ -586,9 +586,11 @@ def web_order():
         data = request.get_json()
         customer = data.get('customer', {})
         items = data.get('items', [])
+        total_price = data.get('total', 0)
         
         method_text = "משלוח 🚚" if data.get('deliveryMethod') == "delivery" else "איסוף עצמי 🏬"
         
+        # --- BUILD WHATSAPP MESSAGE ---
         msg = f"🟢 *הזמנה חדשה מהאתר!* 🟢\n"
         msg += f"--------------------\n"
         msg += f"שם: {customer.get('name')}\n"
@@ -602,16 +604,25 @@ def web_order():
             if customer.get('doorCode'): msg += f"אינטרקום: {customer.get('doorCode')}\n"
             
         msg += f"\n*פירוט:*\n"
-        order_details_for_db = "" # נשמור את הטקסט גם עבור המסד נתונים
+        
+        # --- BUILD PRINTER TEXT (Safe RTL format) ---
+        order_details_for_db = "" 
+        
         for i, item in enumerate(items):
             p = item.get('product', {})
             qty = item.get('quantity', 0)
             price = p.get('price', 0) * qty
-            line_item = f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
-            msg += line_item
-            order_details_for_db += line_item
             
-        msg += f"\n*סה\"כ משוער: ₪{data.get('total', 0):.2f}*\n"
+            # WhatsApp format
+            msg += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
+            
+            # Printer format (No parentheses to prevent RTL flipping)
+            order_details_for_db += f"{p.get('name')} | {qty} ק\"ג | {price:.2f} ש\"ח\n"
+            
+        msg += f"\n*סה\"כ משוער: ₪{total_price:.2f}*\n"
+        
+        # Add total to the printer output
+        order_details_for_db += f"------------------------------\nסה\"כ לתשלום: {total_price:.2f} ש\"ח"
         
         clean_phone = customer.get('phone', '')
         if clean_phone.startswith('0'):
@@ -623,12 +634,11 @@ def web_order():
         # -----------------------------------------------------
         bot_number = "whatsapp:+97223723780" 
         
-        # Pull owner phone dynamically with a fallback
         business = get_business_from_supabase(bot_number)
         if business and business.get('owner_phone'):
             target_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
         else:
-            target_phone = "whatsapp:+972547742596" # Fallback corrected to 054
+            target_phone = "whatsapp:+972547742596" 
             logger.warning("Could not pull owner_phone from Supabase, using fallback number.")
 
         client = get_dynamic_twilio_client(bot_number)
