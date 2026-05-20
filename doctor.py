@@ -1,7 +1,7 @@
 import google.generativeai as genai
 
 # --- PASTE YOUR KEY HERE ---
-GOOGLE_API_KEY = "AIzaSyAMRCNOG0rMTxQ8J43XX_13COIBUdSQbqY" 
+GOOGLE_API_KEY = "AIzaSyCM3Fd79H2FbSOU_DrXXsdDM4jFBN3mJzI" 
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
@@ -12,3 +12,7 @@ try:
             print(f"- {m.name}")
 except Exception as e:
     print(f"Error: {e}")
+
+
+
+    
