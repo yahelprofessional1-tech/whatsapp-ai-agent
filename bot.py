@@ -543,7 +543,6 @@ def retell_tool_handler():
 
 # --- SECURITY: The Bouncer's Memory ---
 ip_tracker = {}
-
 # ==============================================================================
 #                 ZONE D: WEBSITE CHECKOUT API (SECURED)
 # ==============================================================================
@@ -603,11 +602,14 @@ def web_order():
             if customer.get('doorCode'): msg += f"אינטרקום: {customer.get('doorCode')}\n"
             
         msg += f"\n*פירוט:*\n"
+        order_details_for_db = "" # נשמור את הטקסט גם עבור המסד נתונים
         for i, item in enumerate(items):
             p = item.get('product', {})
             qty = item.get('quantity', 0)
             price = p.get('price', 0) * qty
-            msg += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
+            line_item = f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
+            msg += line_item
+            order_details_for_db += line_item
             
         msg += f"\n*סה\"כ משוער: ₪{data.get('total', 0):.2f}*\n"
         
@@ -616,17 +618,47 @@ def web_order():
             clean_phone = '972' + clean_phone[1:]
         msg += f"\n💬 *לחץ כאן לשליחת הודעה ללקוח:*\nhttps://wa.me/{clean_phone}"
 
-        target_phone = "whatsapp:+972587742596" 
+        # -----------------------------------------------------
+        # SENDING TO TWILIO AND SAVING TO SUPABASE
+        # -----------------------------------------------------
         bot_number = "whatsapp:+97223723780" 
         
+        # Pull owner phone dynamically with a fallback
+        business = get_business_from_supabase(bot_number)
+        if business and business.get('owner_phone'):
+            target_phone = ensure_whatsapp_prefix(business.get('owner_phone'))
+        else:
+            target_phone = "whatsapp:+972547742596" # Fallback corrected to 054
+            logger.warning("Could not pull owner_phone from Supabase, using fallback number.")
+
         client = get_dynamic_twilio_client(bot_number)
         
         if client:
+            # 1. Send WhatsApp Message
             client.messages.create(
                 from_=bot_number,
                 to=target_phone,
                 body=msg
             )
+            
+            # 2. Save to Supabase for the Local Printer Agent
+            if supabase:
+                try:
+                    order_data = {
+                        "business_phone": bot_number.replace("whatsapp:", "").replace("+", ""),
+                        "client_name": customer.get('name', 'לקוח אתר'),
+                        "client_phone": customer.get('phone', ''),
+                        "order_details": order_details_for_db.strip(), 
+                        "delivery_method": data.get('deliveryMethod', 'pickup'),
+                        "address": f"{customer.get('city', '')} {customer.get('street', '')} {customer.get('houseNumber', '')}".strip(),
+                        "timing": "בהקדם",
+                        "status": "new"
+                    }
+                    supabase.table('orders').insert(order_data).execute()
+                    logger.info("Web order successfully saved to Supabase for printing.")
+                except Exception as db_err:
+                    logger.error(f"Failed to save WEB ORDER to DB: {db_err}")
+            
         else:
             logger.error("Could not send website order: No Twilio client found for bot number.")
             
