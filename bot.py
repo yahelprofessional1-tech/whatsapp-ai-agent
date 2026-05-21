@@ -590,6 +590,27 @@ def web_order():
         
         method_text = "משלוח 🚚" if data.get('deliveryMethod') == "delivery" else "איסוף עצמי 🏬"
         
+        # --- BUILD ADDRESS STRINGS (For both WhatsApp and Printer) ---
+        whatsapp_address_block = ""
+        database_address_string = ""
+        
+        if data.get('deliveryMethod') == "delivery":
+            base_address = f"{customer.get('city', '')}, {customer.get('street', '')} {customer.get('houseNumber', '')}".strip()
+            whatsapp_address_block += f"כתובת: {base_address}\n"
+            database_address_string += base_address
+            
+            # Add Floor if it exists
+            if customer.get('floor'):
+                whatsapp_address_block += f"קומה/דירה: {customer.get('floor')}\n"
+                database_address_string += f"\nקומה/דירה: {customer.get('floor')}"
+                
+            # Add Delivery Note (doorCode) if it exists
+            if customer.get('doorCode'):
+                whatsapp_address_block += f"הערה לשליח: {customer.get('doorCode')}\n"
+                database_address_string += f"\nהערה לשליח: {customer.get('doorCode')}"
+        else:
+            database_address_string = "איסוף עצמי"
+
         # --- BUILD WHATSAPP MESSAGE ---
         msg = f"🟢 *הזמנה חדשה מהאתר!* 🟢\n"
         msg += f"--------------------\n"
@@ -598,10 +619,7 @@ def web_order():
         msg += f"שיטה: {method_text}\n"
         
         if data.get('deliveryMethod') == "delivery":
-            msg += f"עיר: {customer.get('city')}\n"
-            msg += f"רחוב: {customer.get('street')} {customer.get('houseNumber')}\n"
-            if customer.get('floor'): msg += f"קומה: {customer.get('floor')}\n"
-            if customer.get('doorCode'): msg += f"אינטרקום: {customer.get('doorCode')}\n"
+            msg += whatsapp_address_block
             
         msg += f"\n*פירוט:*\n"
         
@@ -616,7 +634,7 @@ def web_order():
             # WhatsApp format
             msg += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
             
-            # Printer format (No parentheses to prevent RTL flipping)
+            # Printer format
             order_details_for_db += f"{p.get('name')} | {qty} ק\"ג | {price:.2f} ש\"ח\n"
             
         msg += f"\n*סה\"כ משוער: ₪{total_price:.2f}*\n"
@@ -660,7 +678,7 @@ def web_order():
                         "client_phone": customer.get('phone', ''),
                         "order_details": order_details_for_db.strip(), 
                         "delivery_method": data.get('deliveryMethod', 'pickup'),
-                        "address": f"{customer.get('city', '')} {customer.get('street', '')} {customer.get('houseNumber', '')}".strip(),
+                        "address": database_address_string.strip(), # <--- UPDATED WITH FLOOR AND NOTES
                         "timing": "בהקדם",
                         "status": "new"
                     }
