@@ -126,7 +126,6 @@ def save_case_summary(name: str, topic: str, summary: str, phone: str = "Unknown
             return f"SAVED as {classification}."
         else:
             return f"SAVED as {classification} (Note: Lawyer phone or Client not configured)."
-            
     except Exception as e: return f"Error: {e}"
 
 def book_meeting_tool(client_name: str, reason: str):
@@ -324,6 +323,41 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
     except Exception as e: 
         return f"Error: {e}"
 
+def mark_out_of_stock(product_name: str):
+    """Marks a product as out of stock. ONLY the owner (0587742596) can use this."""
+    try:
+        # 1. HARD SECURITY: Catch the absolute phone number of the person texting
+        real_sender = request.values.get('From', '')
+        clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
+        
+        # 2. BOUNCER: Reject if anyone other than the official manager triggers it
+        if not clean_phone.endswith("587742596"):
+            logger.warning(f"UNAUTHORIZED STOCK UPDATE ATTEMPT BLOCKED FROM: {clean_phone}")
+            return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
+            
+        # 3. IF VALIDATED, QUERY SUPABASE
+        response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
+        
+        if not response.data:
+            return f"❌ לא מצאתי במערכת מוצר בשם '{product_name}'. ודא שהשם מדויק."
+            
+        target_product = response.data[0]
+        current_name = target_product['name']
+        product_id = target_product['id']
+        
+        if "אין במלאי" in current_name:
+            return f"⚠️ המוצר '{current_name}' כבר מסומן כעת כחסר במלאי."
+            
+        # 4. EXECUTE NAME OVERWRITE IN CLOUD
+        new_name = f"{current_name} - אין במלאי"
+        supabase.table('products').update({'name': new_name}).eq('id', product_id).execute()
+        
+        return f"✅ עדכון אבטחה בוצע: '{new_name}' הוסר מהאתר בהצלחה."
+
+    except Exception as e:
+        logger.error(f"Stock Update Error: {str(e)}")
+        return f"שגיאת מערכת בעדכון המלאי: {str(e)}"
+
 class SupabaseAgent:
     def __init__(self):
         self.chats = {}
@@ -342,7 +376,10 @@ class SupabaseAgent:
             # --- 2. THE GOD-MODE OVERRIDE ---
             sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
 
-            model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase], system_instruction=sys_instruct)
+            # --- 3. INVENTORY MANAGEMENT LAYER (OWNER INSTRUCTION) ---
+            sys_instruct += "\n[ניהול מלאי: אם המנהל מבקש להוריד מוצר מהמלאי (למשל: 'נגמר האוסובוקו'), השתמש מיד בפונקציה mark_out_of_stock. אל תגיד לו שאתה לא יכול.]"
+
+            model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase, mark_out_of_stock], system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
         
         try:
@@ -453,7 +490,7 @@ def retell_webhook():
                 lawyer_bot_number = "972XXXXXXXXX" # TODO: Put Lawyer's Twilio Number here
                 boss_phone = ensure_whatsapp_prefix(LawyerConfig.LAWYER_PHONE)
                 client = get_dynamic_twilio_client(lawyer_bot_number)
-                
+               
                 if client:
                     msg = (
                         f"⚖️ *שיחה נכנסת חדשה (בוט קולי)* ⚖️\n\n"
@@ -530,7 +567,6 @@ def retell_tool_handler():
                 status = "The documents were submitted to the court yesterday, we are waiting for the judge's response."
             else:
                 status = "I couldn't find a case with that ID number. Please ask them to verify it."
-                
             return jsonify({"result": status})
 
         # --- FALLBACK ---
