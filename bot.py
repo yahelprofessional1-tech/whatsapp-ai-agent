@@ -267,7 +267,9 @@ def send_lawyer_menu(to, body, options, from_):
 #                 ZONE B: SUPABASE BOT (BUTCHER & OTHERS WHATSAPP TEXT)
 # ==============================================================================
 
+# --- TOOL 1: Save Orders ---
 def save_order_supabase(name: str, order_details: str, method: str, address: str, timing: str, phone: str = "לא צוין"):
+    """Saves a customer order to the database. NEVER use this for owner commands."""
     try:
         current_business = getattr(g, 'business_config', None)
         if not current_business: return "Error: No business context."
@@ -276,15 +278,11 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         bot_number = current_business.get('phone_number')
         owner_phone = ensure_whatsapp_prefix(owner_phone)
 
-        # GET DYNAMIC CLIENT
         client = get_dynamic_twilio_client(bot_number)
-
-        # FOOLPROOF FIX: Grab the EXACT phone number from Twilio's HTTP request
         real_sender = request.values.get('From', '')
         clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
         wa_link = f"https://wa.me/{clean_phone}"
 
-        # Beautiful Hebrew Formatting for the Boss (Master Phone)
         body = (
             f"🚨 *הזמנה התקבלה / עודכנה!* 🚨\n\n"
             f"👤 *לקוח:* {name}\n"
@@ -295,15 +293,9 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
             f"💬 *לחץ כאן ליצירת קשר עם הלקוח:* \n{wa_link}"
         )
 
-        # 1. Send WhatsApp to Boss
         if client and owner_phone:
-             client.messages.create(
-                 from_=bot_number,
-                 to=owner_phone,
-                 body=body
-             )
+             client.messages.create(from_=bot_number, to=owner_phone, body=body)
              
-        # 2. Save directly to Supabase DB
         if supabase:
             try:
                 order_data = {
@@ -318,14 +310,15 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
                 }
                 supabase.table('orders').insert(order_data).execute()
             except Exception as db_err:
-                logger.error(f"Failed to save to DB (Table might not exist yet): {db_err}")
+                logger.error(f"Failed to save to DB: {db_err}")
 
         return "ההזמנה נשמרה בהצלחה והועברה לקצב."
     except Exception as e: 
         return f"Error: {e}"
 
+# --- TOOL 2: Mark Out of Stock ---
 def mark_out_of_stock(product_name: str):
-    """Marks a product as out of stock. Used by AI if needed."""
+    """Marks a product as out of stock. Used when the owner says something ran out."""
     try:
         real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
         current_business = getattr(g, 'business_config', None)
@@ -337,7 +330,6 @@ def mark_out_of_stock(product_name: str):
                 logger.warning(f"UNAUTHORIZED STOCK UPDATE ATTEMPT BLOCKED FROM: {real_sender}")
                 return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
                 
-        # 3. IF VALIDATED, QUERY SUPABASE
         response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
         
         if not response.data:
@@ -350,76 +342,100 @@ def mark_out_of_stock(product_name: str):
         if "אין במלאי" in current_name:
             return f"⚠️ המוצר '{current_name}' כבר מסומן כעת כחסר במלאי."
             
-        # 4. EXECUTE NAME OVERWRITE IN CLOUD
         new_name = f"{current_name} - אין במלאי"
-        supabase.table('products').update({'name': new_name}).eq('id', product_id).execute()
+        supabase.table('products').update({'name': new_name, 'in_stock': False}).eq('id', product_id).execute()
         
         return f"✅ עדכון אבטחה בוצע: '{new_name}' הוסר מהאתר בהצלחה."
     except Exception as e:
         logger.error(f"Stock Update Error: {str(e)}")
         return f"שגיאת מערכת בעדכון המלאי: {str(e)}"
 
-# --- NEW: DIRECT ADMIN BYPASS (FASTER & MORE RELIABLE THAN AI) ---
-def handle_admin_commands(incoming_message: str):
-    """Intercepts commands directly from the boss, bypassing the AI for fast DB updates."""
-    msg_lower = incoming_message.strip()
-    
-    # 1. CHANGE PRICE FEATURE ("עדכן מחיר [שם] [מחיר]")
-    if msg_lower.startswith("עדכן מחיר"):
-        try:
-            parts = incoming_message.split(" ")
-            new_price = parts[-1] 
-            product_name = " ".join(parts[2:-1]) 
-            
-            clean_price = re.sub(r'[^\d.]', '', new_price)
-            if not clean_price:
-                return "❌ שגיאה: נא לציין מחיר מספרי."
-
-            response = supabase.table('products').update({
-                'price': clean_price,
-                'in_stock': True # Automatically restock when updating price
-            }).ilike('name', f'%{product_name}%').execute()
-            
-            if len(response.data) > 0:
-                # Clean up the name in case it currently says "אין במלאי"
-                current_name = response.data[0]['name']
-                clean_name = current_name.replace(" - אין במלאי", "").replace(" אין במלאי", "")
-                if clean_name != current_name:
-                    supabase.table('products').update({'name': clean_name}).eq('id', response.data[0]['id']).execute()
-                    
-                return f"✅ עודכן: המחיר של {clean_name} שונה ל-{clean_price} ש״ח (וחזר למלאי)."
-            else:
-                return f"❌ שגיאה: לא מצאתי בשר בשם '{product_name}'."
-        except Exception as e:
-            return "❌ שגיאה בפורמט. השתמש ב: עדכן מחיר [שם המוצר] [מחיר]"
-
-    # 2. RESTOCK FEATURE ("החזר למלאי [שם]")
-    elif msg_lower.startswith("החזר למלאי"):
-        try:
-            product_name = incoming_message.replace("החזר למלאי", "").strip()
-            
-            # Find the product
-            response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
-            
-            if len(response.data) > 0:
-                target = response.data[0]
-                current_name = target['name']
+# --- TOOL 3: Restock Product ---
+def restock_product(product_name: str):
+    """Returns a product to stock. Used when the owner asks to return an item to inventory."""
+    try:
+        real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
+        current_business = getattr(g, 'business_config', None)
+        
+        # Strict Security Check
+        if current_business:
+            owner_phone = current_business.get('owner_phone', '').replace("+", "")
+            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+                return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
                 
-                # Remove the "Out of stock" text from the name so it looks normal on the site
-                clean_name = current_name.replace(" - אין במלאי", "").replace(" אין במלאי", "")
-                
-                supabase.table('products').update({
-                    'in_stock': True,
-                    'name': clean_name
-                }).eq('id', target['id']).execute()
-                
-                return f"✅ עודכן: {clean_name} חזר למלאי בהצלחה!"
-            else:
-                return f"❌ שגיאה: לא מצאתי בשר בשם '{product_name}'."
-        except Exception as e:
-            return "❌ שגיאה. השתמש ב: החזר למלאי [שם המוצר]"
+        response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
+        
+        if not response.data:
+            return f"❌ לא מצאתי מוצר בשם '{product_name}'."
+            
+        target = response.data[0]
+        clean_name = target['name'].replace(" - אין במלאי", "").replace(" אין במלאי", "")
+        
+        supabase.table('products').update({'in_stock': True, 'name': clean_name}).eq('id', target['id']).execute()
+        
+        return f"✅ מושלם! '{clean_name}' חזר למלאי וזמין באתר."
+    except Exception as e:
+        return f"שגיאה: {str(e)}"
 
-    return None
+# --- TOOL 4: Update Price ---
+def update_product_price(product_name: str, new_price: str):
+    """Updates the price of a product. Used when the owner requests a price change."""
+    try:
+        real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
+        current_business = getattr(g, 'business_config', None)
+        
+        # Strict Security Check
+        if current_business:
+            owner_phone = current_business.get('owner_phone', '').replace("+", "")
+            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+                return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
+
+        clean_price = re.sub(r'[^\d.]', '', str(new_price))
+        response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
+        
+        if not response.data:
+            return f"❌ לא מצאתי בשר בשם '{product_name}'."
+            
+        target = response.data[0]
+        clean_name = target['name'].replace(" - אין במלאי", "").replace(" אין במלאי", "")
+
+        supabase.table('products').update({'price': clean_price, 'in_stock': True, 'name': clean_name}).eq('id', target['id']).execute()
+        
+        return f"✅ מעולה! המחיר של '{clean_name}' שונה ל-{clean_price} ש״ח."
+    except Exception as e:
+        return f"שגיאה: {str(e)}"
+
+# --- TOOL 5: Check Inventory Status ---
+def check_out_of_stock_inventory():
+    """Checks the database and returns a list of all products that are currently out of stock. Restricted to owner."""
+    try:
+        real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
+        current_business = getattr(g, 'business_config', None)
+        
+        # Strict Security Check
+        if current_business:
+            owner_phone = current_business.get('owner_phone', '').replace("+", "")
+            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+                return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
+
+        # Check by boolean or name
+        res1 = supabase.table('products').select('name').eq('in_stock', False).execute()
+        res2 = supabase.table('products').select('name').ilike('name', '%אין במלאי%').execute()
+        
+        missing = set()
+        if res1.data:
+            for item in res1.data: missing.add(item['name'].replace(' - אין במלאי', '').replace(' אין במלאי', ''))
+        if res2.data:
+            for item in res2.data: missing.add(item['name'].replace(' - אין במלאי', '').replace(' אין במלאי', ''))
+            
+        if not missing:
+            return "✅ בדקתי במערכת וכרגע כל המוצרים שלנו נמצאים במלאי!"
+            
+        items_list = ", ".join(missing)
+        return f"⚠️ המוצרים הבאים כרגע חסרים במלאי: {items_list}"
+    except Exception as e:
+        return "שגיאה בבדיקת המלאי מול בסיס הנתונים."
+
 
 class SupabaseAgent:
     def __init__(self):
@@ -440,9 +456,10 @@ class SupabaseAgent:
             sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
 
             # --- 3. INVENTORY MANAGEMENT LAYER (OWNER INSTRUCTION) ---
-            sys_instruct += "\n[ניהול מלאי: אם המנהל מבקש להוריד מוצר מהמלאי (למשל: 'נגמר האוסובוקו'), השתמש מיד בפונקציה mark_out_of_stock. אל תגיד לו שאתה לא יכול.]"
+            sys_instruct += "\n[ניהול מלאי: אתה מנהל גם את החנות מאחורי הקלעים עבור הבעלים. יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), לעדכן מחירים (update_product_price), ולבדוק מה חסר כרגע (check_out_of_stock_inventory). הבעלים יכול פשוט לדבר איתך באופן טבעי (למשל: 'נגמר העוף' או 'תחזיר את האנטריקוט'). השתמש בכלים האלו מיד כשהוא מבקש, ואל תגיד שאתה לא מסוגל. המערכת תחסום לקוחות רגילים מלהשתמש בזה (יש חסימת אבטחה בקוד), אז אתה יכול להפעיל את הכלים בלי לחשוש שמדובר בלקוח.]"
 
-            model = genai.GenerativeModel('gemini-2.5-flash', tools=[save_order_supabase, mark_out_of_stock], system_instruction=sys_instruct)
+            tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price, check_out_of_stock_inventory]
+            model = genai.GenerativeModel('gemini-2.5-flash', tools=tools_list, system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
         
         try:
@@ -494,20 +511,7 @@ def handle_supabase_flow(sender, msg, bot_number):
     business = res.data[0]
     g.business_config = business
     
-    # --- ADMIN BYPASS SECURITY CHECK ---
-    clean_sender = sender.replace("whatsapp:", "").replace("+", "")
-    owner_phone = business.get('owner_phone', '').replace("+", "")
-    
-    # If the text is from the boss, check if it's a direct command
-    if clean_sender == owner_phone or clean_sender.endswith("587742596"):
-        if msg.strip().startswith("עדכן מחיר") or msg.strip().startswith("החזר למלאי"):
-            admin_reply = handle_admin_commands(msg)
-            if admin_reply:
-                resp = MessagingResponse()
-                resp.message(admin_reply)
-                return str(resp)
-    
-    # If it's not a boss command, send it to the AI as normal
+    # Send directly to AI (AI will handle tool execution based on conversational context)
     reply = supabase_agent.get_response(sender, msg, business)
     resp = MessagingResponse()
     resp.message(reply)
