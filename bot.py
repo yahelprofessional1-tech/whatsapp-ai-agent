@@ -101,7 +101,8 @@ class LawyerConfig:
     }
 
 def ensure_whatsapp_prefix(phone):
-    if not phone: return None
+    if not phone: 
+        return None
     clean = phone.strip()
     if not clean.startswith("whatsapp:"):
         return f"whatsapp:{clean}"
@@ -160,12 +161,11 @@ class LawyerAgent:
         2. קבל שם מלא של הלקוח.
         3. הבן את הבעיה המשפטית.
         4. סווג ושמור את התיק.
-
+        
         **תהליך השיחה - עקוב בדיוק:**
 
         📍 **שלב 1: אמפתיה ראשונית**
         אם הלקוח מביע כאב/מצוקה/פחד, התחל עם מילות תמיכה והקשבה.
-
         📍 **שלב 2: תשובה לשאלה (אם יש)**
         כלל זהב: תשובה קצרה + הפניה לעו"ד לפרטים. "אם אתה לא יודע משהו פשוט תגיד שעורך דין חסקי יענה על זה".
 
@@ -200,6 +200,7 @@ class LawyerAgent:
     def chat(self, user, msg):
         if user not in self.chats:
             self.chats[user] = self.model.start_chat(enable_automatic_function_calling=True)
+ 
         try:
             res = self.chats[user].send_message(msg)
             return res.text if res.text else "הפרטים נקלטו."
@@ -270,7 +271,7 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
     try:
         current_business = getattr(g, 'business_config', None)
         if not current_business: return "Error: No business context."
-        
+       
         owner_phone = current_business.get('owner_phone')
         bot_number = current_business.get('phone_number')
         owner_phone = ensure_whatsapp_prefix(owner_phone)
@@ -324,17 +325,18 @@ def save_order_supabase(name: str, order_details: str, method: str, address: str
         return f"Error: {e}"
 
 def mark_out_of_stock(product_name: str):
-    """Marks a product as out of stock. ONLY the owner (0587742596) can use this."""
+    """Marks a product as out of stock. Used by AI if needed."""
     try:
-        # 1. HARD SECURITY: Catch the absolute phone number of the person texting
-        real_sender = request.values.get('From', '')
-        clean_phone = real_sender.replace("whatsapp:", "").replace("+", "")
+        real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
+        current_business = getattr(g, 'business_config', None)
         
-        # 2. BOUNCER: Reject if anyone other than the official manager triggers it
-        if not clean_phone.endswith("587742596"):
-            logger.warning(f"UNAUTHORIZED STOCK UPDATE ATTEMPT BLOCKED FROM: {clean_phone}")
-            return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
-            
+        # Security Check: Match against dynamic DB owner OR fallback boss number
+        if current_business:
+            owner_phone = current_business.get('owner_phone', '').replace("+", "")
+            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+                logger.warning(f"UNAUTHORIZED STOCK UPDATE ATTEMPT BLOCKED FROM: {real_sender}")
+                return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
+                
         # 3. IF VALIDATED, QUERY SUPABASE
         response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
         
@@ -353,10 +355,71 @@ def mark_out_of_stock(product_name: str):
         supabase.table('products').update({'name': new_name}).eq('id', product_id).execute()
         
         return f"✅ עדכון אבטחה בוצע: '{new_name}' הוסר מהאתר בהצלחה."
-
     except Exception as e:
         logger.error(f"Stock Update Error: {str(e)}")
         return f"שגיאת מערכת בעדכון המלאי: {str(e)}"
+
+# --- NEW: DIRECT ADMIN BYPASS (FASTER & MORE RELIABLE THAN AI) ---
+def handle_admin_commands(incoming_message: str):
+    """Intercepts commands directly from the boss, bypassing the AI for fast DB updates."""
+    msg_lower = incoming_message.strip()
+    
+    # 1. CHANGE PRICE FEATURE ("עדכן מחיר [שם] [מחיר]")
+    if msg_lower.startswith("עדכן מחיר"):
+        try:
+            parts = incoming_message.split(" ")
+            new_price = parts[-1] 
+            product_name = " ".join(parts[2:-1]) 
+            
+            clean_price = re.sub(r'[^\d.]', '', new_price)
+            if not clean_price:
+                return "❌ שגיאה: נא לציין מחיר מספרי."
+
+            response = supabase.table('products').update({
+                'price': clean_price,
+                'in_stock': True # Automatically restock when updating price
+            }).ilike('name', f'%{product_name}%').execute()
+            
+            if len(response.data) > 0:
+                # Clean up the name in case it currently says "אין במלאי"
+                current_name = response.data[0]['name']
+                clean_name = current_name.replace(" - אין במלאי", "").replace(" אין במלאי", "")
+                if clean_name != current_name:
+                    supabase.table('products').update({'name': clean_name}).eq('id', response.data[0]['id']).execute()
+                    
+                return f"✅ עודכן: המחיר של {clean_name} שונה ל-{clean_price} ש״ח (וחזר למלאי)."
+            else:
+                return f"❌ שגיאה: לא מצאתי בשר בשם '{product_name}'."
+        except Exception as e:
+            return "❌ שגיאה בפורמט. השתמש ב: עדכן מחיר [שם המוצר] [מחיר]"
+
+    # 2. RESTOCK FEATURE ("החזר למלאי [שם]")
+    elif msg_lower.startswith("החזר למלאי"):
+        try:
+            product_name = incoming_message.replace("החזר למלאי", "").strip()
+            
+            # Find the product
+            response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
+            
+            if len(response.data) > 0:
+                target = response.data[0]
+                current_name = target['name']
+                
+                # Remove the "Out of stock" text from the name so it looks normal on the site
+                clean_name = current_name.replace(" - אין במלאי", "").replace(" אין במלאי", "")
+                
+                supabase.table('products').update({
+                    'in_stock': True,
+                    'name': clean_name
+                }).eq('id', target['id']).execute()
+                
+                return f"✅ עודכן: {clean_name} חזר למלאי בהצלחה!"
+            else:
+                return f"❌ שגיאה: לא מצאתי בשר בשם '{product_name}'."
+        except Exception as e:
+            return "❌ שגיאה. השתמש ב: החזר למלאי [שם המוצר]"
+
+    return None
 
 class SupabaseAgent:
     def __init__(self):
@@ -430,6 +493,21 @@ def handle_supabase_flow(sender, msg, bot_number):
         
     business = res.data[0]
     g.business_config = business
+    
+    # --- ADMIN BYPASS SECURITY CHECK ---
+    clean_sender = sender.replace("whatsapp:", "").replace("+", "")
+    owner_phone = business.get('owner_phone', '').replace("+", "")
+    
+    # If the text is from the boss, check if it's a direct command
+    if clean_sender == owner_phone or clean_sender.endswith("587742596"):
+        if msg.strip().startswith("עדכן מחיר") or msg.strip().startswith("החזר למלאי"):
+            admin_reply = handle_admin_commands(msg)
+            if admin_reply:
+                resp = MessagingResponse()
+                resp.message(admin_reply)
+                return str(resp)
+    
+    # If it's not a boss command, send it to the AI as normal
     reply = supabase_agent.get_response(sender, msg, business)
     resp = MessagingResponse()
     resp.message(reply)
@@ -547,7 +625,7 @@ def retell_tool_handler():
             
             msg = ""
             if link_type == "intake":
-                msg = "שלום! הנה הקישור לטופס הקליטה למשרד עו\"ד שמעון חסקי: [LINK]"
+                msg = "שלום!\nהנה הקישור לטופס הקליטה למשרד עו\"ד שמעון חסקי: [LINK]"
             elif link_type == "document":
                 msg = "להעלאת מסמכים מאובטחת לתיק שלך, לחץ כאן: [LINK]"
             else:
@@ -567,6 +645,7 @@ def retell_tool_handler():
                 status = "The documents were submitted to the court yesterday, we are waiting for the judge's response."
             else:
                 status = "I couldn't find a case with that ID number. Please ask them to verify it."
+            
             return jsonify({"result": status})
 
         # --- FALLBACK ---
