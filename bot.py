@@ -790,13 +790,19 @@ def web_order():
                 items_list_whatsapp += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
 
             template_variables = {
-                "1": customer.get('name', 'לקוח לא ידוע'),
-                "2": customer.get('phone', 'לא צוין'),
+                # Add 'or' fallback to prevent empty "" strings from crashing the API
+                "1": customer.get('name') or 'לקוח',
+                "2": customer.get('phone') or 'לא צוין',
                 "3": method_text,
-                "4": whatsapp_address_block.strip() if whatsapp_address_block.strip() else "איסוף עצמי", 
-                "5": items_list_whatsapp.strip(),
+                
+                # Replace any internal newlines in the address with a comma
+                "4": (whatsapp_address_block.strip() if whatsapp_address_block.strip() else "איסוף עצמי").replace('\n', ', '), 
+                
+                # Replace any internal newlines in the items list with a divider symbol
+                "5": items_list_whatsapp.strip().replace('\n', ' | '),
+                
                 "6": f"{total_price:.2f}",
-                "7": clean_phone
+                "7": clean_phone or "000000000"
             }
 
             # 1. Send WhatsApp Message via Content API
