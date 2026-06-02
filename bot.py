@@ -781,12 +781,35 @@ def web_order():
         client = get_dynamic_twilio_client(bot_number)
         
         if client:
-            # 1. Send WhatsApp Message
-            client.messages.create(
-                from_=bot_number,
-                to=target_phone,
-                body=msg
-            )
+            # --- 1. PREPARE THE DYNAMIC VARIABLES FOR THE TEMPLATE ---
+            items_list_whatsapp = ""
+            for i, item in enumerate(items):
+                p = item.get('product', {})
+                qty = item.get('quantity', 0)
+                price = p.get('price', 0) * qty
+                items_list_whatsapp += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
+
+            template_variables = {
+                "1": customer.get('name', 'לקוח לא ידוע'),
+                "2": customer.get('phone', 'לא צוין'),
+                "3": method_text,
+                "4": whatsapp_address_block.strip() if whatsapp_address_block.strip() else "איסוף עצמי", 
+                "5": items_list_whatsapp.strip(),
+                "6": f"{total_price:.2f}",
+                "7": clean_phone
+            }
+
+            # 1. Send WhatsApp Message via Content API
+            try:
+                client.messages.create(
+                    from_=bot_number,
+                    to=target_phone,
+                    content_sid="HX646014f238db357b5f598f8c5c129d30",
+                    content_variables=json.dumps(template_variables)
+                )
+                logger.info("Web order template message sent successfully.")
+            except Exception as twilio_err:
+                logger.error(f"Failed to send Twilio template: {twilio_err}")
             
             # 2. Save to Supabase for the Local Printer Agent
             if supabase:
