@@ -323,10 +323,11 @@ def mark_out_of_stock(product_name: str):
         real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
         current_business = getattr(g, 'business_config', None)
         
-        # Security Check: Match against dynamic DB owner OR fallback boss number
+        # Security Check: Match against dynamic DB owner OR specific admin numbers
         if current_business:
             owner_phone = current_business.get('owner_phone', '').replace("+", "")
-            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+            authorized_admins = [owner_phone, "972547742596", "972525974462"]
+            if real_sender not in authorized_admins:
                 logger.warning(f"UNAUTHORIZED STOCK UPDATE ATTEMPT BLOCKED FROM: {real_sender}")
                 return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
                 
@@ -357,10 +358,11 @@ def restock_product(product_name: str):
         real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
         current_business = getattr(g, 'business_config', None)
         
-        # Strict Security Check
+        # Security Check: Match against dynamic DB owner OR specific admin numbers
         if current_business:
             owner_phone = current_business.get('owner_phone', '').replace("+", "")
-            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+            authorized_admins = [owner_phone, "972547742596", "972525974462"]
+            if real_sender not in authorized_admins:
                 return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
                 
         response = supabase.table('products').select('*').ilike('name', f'%{product_name}%').execute()
@@ -384,10 +386,11 @@ def update_product_price(product_name: str, new_price: str):
         real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
         current_business = getattr(g, 'business_config', None)
         
-        # Strict Security Check
+        # Security Check: Match against dynamic DB owner OR specific admin numbers
         if current_business:
             owner_phone = current_business.get('owner_phone', '').replace("+", "")
-            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+            authorized_admins = [owner_phone, "972547742596", "972525974462"]
+            if real_sender not in authorized_admins:
                 return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
 
         clean_price = re.sub(r'[^\d.]', '', str(new_price))
@@ -412,10 +415,11 @@ def check_out_of_stock_inventory():
         real_sender = request.values.get('From', '').replace("whatsapp:", "").replace("+", "")
         current_business = getattr(g, 'business_config', None)
         
-        # Strict Security Check
+        # Security Check: Match against dynamic DB owner OR specific admin numbers
         if current_business:
             owner_phone = current_business.get('owner_phone', '').replace("+", "")
-            if real_sender != owner_phone and not real_sender.endswith("587742596"):
+            authorized_admins = [owner_phone, "972547742596", "972525974462"]
+            if real_sender not in authorized_admins:
                 return "❌ שגיאה: פעולה זו מורשית למנהל המערכת בלבד."
 
         # Check by boolean or name
@@ -709,6 +713,10 @@ def web_order():
         
         method_text = "משלוח 🚚" if data.get('deliveryMethod') == "delivery" else "איסוף עצמי 🏬"
         
+        # Pull new variables from frontend
+        notes = customer.get('notes', '')
+        pickup_time = customer.get('pickupTime', '')
+        
         # --- BUILD ADDRESS STRINGS (For both WhatsApp and Printer) ---
         whatsapp_address_block = ""
         database_address_string = ""
@@ -723,25 +731,22 @@ def web_order():
                 whatsapp_address_block += f"קומה/דירה: {customer.get('floor')}\n"
                 database_address_string += f"\nקומה/דירה: {customer.get('floor')}"
                 
-            # Add Delivery Note (doorCode) if it exists
-            if customer.get('doorCode'):
-                whatsapp_address_block += f"הערה לשליח: {customer.get('doorCode')}\n"
-                database_address_string += f"\nהערה לשליח: {customer.get('doorCode')}"
+            # Add Notes if they exist (replaces the old 'doorCode' logic to match new frontend)
+            if notes:
+                whatsapp_address_block += f"הערות: {notes}\n"
+                database_address_string += f"\nהערות: {notes}"
         else:
+            # Pickup logic - inject time and notes here so the Twilio template doesn't break!
+            whatsapp_address_block = "איסוף עצמי"
             database_address_string = "איסוף עצמי"
-
-        # --- BUILD WHATSAPP MESSAGE ---
-        msg = f"🟢 *הזמנה חדשה מהאתר!* 🟢\n"
-        msg += f"--------------------\n"
-        msg += f"שם: {customer.get('name')}\n"
-        msg += f"טלפון: {customer.get('phone')}\n"
-        msg += f"שיטה: {method_text}\n"
-        
-        if data.get('deliveryMethod') == "delivery":
-            msg += whatsapp_address_block
             
-        msg += f"\n*פירוט:*\n"
-        
+            if pickup_time:
+                whatsapp_address_block += f"\nשעת איסוף: {pickup_time}"
+                database_address_string += f"\nשעת איסוף: {pickup_time}"
+            if notes:
+                whatsapp_address_block += f"\nהערות: {notes}"
+                database_address_string += f"\nהערות: {notes}"
+
         # --- BUILD PRINTER TEXT (Safe RTL format) ---
         order_details_for_db = "" 
         
@@ -750,21 +755,15 @@ def web_order():
             qty = item.get('quantity', 0)
             price = p.get('price', 0) * qty
             
-            # WhatsApp format
-            msg += f"{i+1}. {p.get('name')} - {qty} ק\"ג (₪{price:.2f})\n"
-            
             # Printer format
             order_details_for_db += f"{p.get('name')} | {qty} ק\"ג | {price:.2f} ש\"ח\n"
             
-        msg += f"\n*סה\"כ משוער: ₪{total_price:.2f}*\n"
-        
         # Add total to the printer output
         order_details_for_db += f"------------------------------\nסה\"כ לתשלום: {total_price:.2f} ש\"ח"
         
         clean_phone = customer.get('phone', '')
         if clean_phone.startswith('0'):
             clean_phone = '972' + clean_phone[1:]
-        msg += f"\n💬 *לחץ כאן לשליחת הודעה ללקוח:*\nhttps://wa.me/{clean_phone}"
 
         # -----------------------------------------------------
         # SENDING TO TWILIO AND SAVING TO SUPABASE
@@ -795,7 +794,8 @@ def web_order():
                 "2": customer.get('phone') or 'לא צוין',
                 "3": method_text,
                 
-                # Replace any internal newlines in the address with a comma
+                # MAGIC HAPPENS HERE: The notes and pickup time are safely packed into the 'Address' slot (slot 4).
+                # This guarantees your existing Twilio template will not break.
                 "4": (whatsapp_address_block.strip() if whatsapp_address_block.strip() else "איסוף עצמי").replace('\n', ', '), 
                 
                 # Replace any internal newlines in the items list with a divider symbol
@@ -826,7 +826,7 @@ def web_order():
                         "client_phone": customer.get('phone', ''),
                         "order_details": order_details_for_db.strip(), 
                         "delivery_method": data.get('deliveryMethod', 'pickup'),
-                        "address": database_address_string.strip(), # <--- UPDATED WITH FLOOR AND NOTES
+                        "address": database_address_string.strip(), # <--- THIS NOW INCLUDES TIME & NOTES
                         "timing": "בהקדם",
                         "status": "new"
                     }
