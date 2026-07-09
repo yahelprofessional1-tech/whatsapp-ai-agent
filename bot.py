@@ -351,6 +351,77 @@ def handle_supabase_flow(sender, msg, bot_number):
     return str(resp)
 
 # ==============================================================================
+#                 PERSONAL NOTE PRINTING (OWNER -> PRINTER)
+# ==============================================================================
+# The owner (or a system admin) can send the bot a free-text WhatsApp message
+# that starts with "הדפס" and the text will go straight to the shop printer.
+# This is intercepted BEFORE the AI agent and BEFORE any Twilio template logic,
+# so the existing order flow and the working template are NOT touched.
+
+PRINT_NOTE_PREFIXES = ["הדפס:", "הדפס ", "הדפס\n", "print:", "Print:", "PRINT:"]
+
+def try_handle_print_note(sender, msg, bot_number):
+    """If this is an owner 'הדפס ...' command, queue it for the local printer.
+    Returns a TwiML response string, or None to continue with the normal flow."""
+
+    note_text = None
+    if msg.strip() == "הדפס":
+        note_text = ""  # command with no text -> we reply with usage help below
+    else:
+        for prefix in PRINT_NOTE_PREFIXES:
+            if msg.startswith(prefix):
+                note_text = msg[len(prefix):].strip()
+                break
+
+    if note_text is None:
+        return None  # not a print command -> normal AI flow, untouched
+
+    # --- SECURITY: only the business owner or system admins can print notes ---
+    clean_sender = str(sender).replace("whatsapp:", "").replace("+", "").strip()
+    business = get_business_from_supabase(bot_number)
+    owner_phone = ""
+    if business:
+        owner_phone = (business.get('owner_phone') or '').replace("whatsapp:", "").replace("+", "").strip()
+
+    allowed = ([owner_phone] if owner_phone else []) + ADMIN_OVERRIDE_NUMBERS
+    if clean_sender not in allowed:
+        # A regular customer typed something starting with "הדפס" -
+        # silently fall through to the normal AI flow, don't reveal the feature.
+        logger.warning(f"Print-note command ignored from non-admin: {clean_sender}")
+        return None
+
+    resp = MessagingResponse()
+
+    if not note_text:
+        resp.message("✍️ כדי להדפיס פתק בחנות, כתוב:\nהדפס <הטקסט שלך>")
+        return str(resp)
+
+    if not supabase:
+        resp.message("❌ שגיאה: אין חיבור לבסיס הנתונים, אי אפשר לשלוח למדפסת.")
+        return str(resp)
+
+    try:
+        clean_bot = str(bot_number).replace("whatsapp:", "").replace("+", "").strip()
+        note_row = {
+            "business_phone": clean_bot,
+            "client_name": "הודעה אישית",
+            "client_phone": clean_sender,
+            "order_details": note_text,
+            "delivery_method": "note",  # the printer agent uses this marker for the note layout
+            "address": "",
+            "timing": "",
+            "status": "new"
+        }
+        supabase.table('orders').insert(note_row).execute()
+        logger.info(f"Personal note queued for printing by {clean_sender}")
+        resp.message("🖨️ ההודעה נשלחה למדפסת!")
+    except Exception as e:
+        logger.error(f"Failed to queue print note: {e}")
+        resp.message(f"❌ שגיאה בשליחה למדפסת: {e}")
+
+    return str(resp)
+
+# ==============================================================================
 #                 MAIN ROUTER (WHATSAPP TEXT)
 # ==============================================================================
 
@@ -359,6 +430,11 @@ def main_router():
     incoming_msg = request.values.get('Body', '').strip()
     sender = request.values.get('From', '')
     bot_number = request.values.get('To', '')
+
+    # Personal note printing (owner only) - checked first, does NOT touch the AI/template flow
+    note_response = try_handle_print_note(sender, incoming_msg, bot_number)
+    if note_response:
+        return note_response
 
     return handle_supabase_flow(sender, incoming_msg, bot_number)
 
