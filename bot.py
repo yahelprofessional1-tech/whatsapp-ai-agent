@@ -277,6 +277,236 @@ def check_out_of_stock_inventory():
         return "שגיאה בבדיקת המלאי מול בסיס הנתונים."
 
 
+# ==============================================================================
+#          TOOLS 6+7: OWNER PHONE ORDERS (WHATSAPP -> WEBSITE ORDER -> PRINTER)
+# ==============================================================================
+# The owner sends a free-text order over WhatsApp ("2 קילו אנטריקוט וקילו טחון,
+# איסוף ב-14:00 על שם יוסי"). The AI extracts the details, validates them against
+# the products table (real names + prices from the website), asks the owner about
+# anything unclear, shows a preview, and only after explicit approval inserts a
+# row into the 'orders' table in the EXACT format the website checkout uses -
+# so the local printer agent picks it up and prints it like any web order.
+# No printer-side changes are needed.
+
+def _parse_price_value(price_raw):
+    """The website stores prices as text ('₪ 199.00', '67₪', '50'). Extract a float."""
+    if price_raw is None:
+        return None
+    if isinstance(price_raw, (int, float)):
+        return float(price_raw)
+    cleaned = re.sub(r'[^\d.]', '', str(price_raw))
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def _strip_stock_suffix(name):
+    return str(name or "").replace(" - אין במלאי", "").replace(" אין במלאי", "").strip()
+
+
+def _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing):
+    """Shared validation for preview/submit. Returns a dict:
+    { ok, problems[], warnings[], preview, order_row } - order_row is ready to insert."""
+    problems = []
+    warnings = []
+
+    # --- 1. Parse the items JSON ---
+    try:
+        items = json.loads(items_json) if isinstance(items_json, str) else items_json
+        if not isinstance(items, list) or not items:
+            raise ValueError
+    except Exception:
+        return {"ok": False, "problems": ["items_json חייב להיות רשימת JSON של פריטים, למשל: "
+                                          "[{\"name\": \"אנטריקוט\", \"qty\": 2}]"], "warnings": []}
+
+    # --- 2. Normalize delivery method ---
+    method_txt = str(method or "").strip()
+    if "משלוח" in method_txt or "deliver" in method_txt.lower():
+        method_norm = "delivery"
+    elif "איסוף" in method_txt or "pickup" in method_txt.lower() or "עצמי" in method_txt:
+        method_norm = "pickup"
+    else:
+        method_norm = None
+        problems.append("לא צוין אם ההזמנה למשלוח או לאיסוף עצמי.")
+
+    if method_norm == "delivery" and not str(address or "").strip():
+        problems.append("הזמנה למשלוח - חסרה כתובת.")
+
+    # --- 3. Resolve each item against the products table ---
+    resolved = []
+    for it in items:
+        if not isinstance(it, dict):
+            problems.append("אחד הפריטים לא בפורמט תקין.")
+            continue
+
+        raw_name = str(it.get("name", "")).strip()
+        if not raw_name:
+            problems.append("אחד הפריטים חסר שם.")
+            continue
+
+        # Quantity
+        try:
+            qty = float(it.get("qty", it.get("quantity")))
+            if qty <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            problems.append(f"חסרה כמות תקינה עבור '{raw_name}'.")
+            continue
+
+        unit = str(it.get("unit", "")).strip() or "ק\"ג"
+        manual_price = _parse_price_value(it.get("price"))
+
+        display_name = raw_name
+        unit_price = manual_price
+        matched = None
+
+        if supabase:
+            try:
+                res = supabase.table('products').select('*').ilike('name', f'%{raw_name}%').execute()
+                candidates = res.data or []
+            except Exception as e:
+                logger.error(f"Owner order product lookup failed: {e}")
+                candidates = []
+
+            if len(candidates) == 1:
+                matched = candidates[0]
+            elif len(candidates) > 1:
+                # Try an exact match (ignoring the out-of-stock suffix)
+                exact = [c for c in candidates if _strip_stock_suffix(c.get('name')) == raw_name]
+                if len(exact) == 1:
+                    matched = exact[0]
+                elif manual_price is None:
+                    options = ", ".join(_strip_stock_suffix(c.get('name')) for c in candidates[:5])
+                    problems.append(f"נמצאו כמה מוצרים שמתאימים ל-'{raw_name}': {options}. איזה מהם?")
+                    continue
+            elif not candidates and manual_price is None:
+                problems.append(f"לא מצאתי באתר מוצר בשם '{raw_name}'. "
+                                f"אפשר לתת שם מדויק יותר, או מחיר ידני כדי לרשום אותו כפריט חופשי.")
+                continue
+
+        if matched:
+            display_name = _strip_stock_suffix(matched.get('name'))
+            if unit_price is None:
+                unit_price = _parse_price_value(matched.get('price'))
+            if matched.get('in_stock') is False or "אין במלאי" in str(matched.get('name', '')):
+                warnings.append(f"שים לב: '{display_name}' מסומן כרגע באתר כחסר במלאי.")
+
+        if unit_price is None:
+            problems.append(f"לא הצלחתי לקרוא את המחיר של '{display_name}' מהאתר. מה המחיר ל{unit}?")
+            continue
+
+        resolved.append({"name": display_name, "qty": qty, "unit": unit, "unit_price": unit_price})
+
+    if not resolved and not problems:
+        problems.append("לא זוהו פריטים בהזמנה.")
+
+    if problems:
+        return {"ok": False, "problems": problems, "warnings": warnings}
+
+    # --- 4. Build the printer text in the SAME format as a website order ---
+    total_price = 0.0
+    order_details = ""
+    preview_lines = []
+    for i, r in enumerate(resolved):
+        line_total = r["unit_price"] * r["qty"]
+        total_price += line_total
+        qty_str = f"{r['qty']:g}"
+        order_details += f"{r['name']} | {qty_str} {r['unit']} | {line_total:.2f} ש\"ח\n"
+        preview_lines.append(f"{i+1}. {r['name']} - {qty_str} {r['unit']} × ‏{r['unit_price']:.2f} = ‏{line_total:.2f} ש\"ח")
+
+    order_details += f"------------------------------\nסה\"כ לתשלום: {total_price:.2f} ש\"ח"
+
+    # --- 5. Address string, same convention as the web checkout ---
+    timing_txt = str(timing or "").strip()
+    if method_norm == "delivery":
+        db_address = str(address).strip()
+        method_he = "משלוח 🚚"
+    else:
+        db_address = "איסוף עצמי"
+        if timing_txt:
+            db_address += f"\nשעת איסוף: {timing_txt}"
+        method_he = "איסוף עצמי 🏬"
+
+    current_business = getattr(g, 'business_config', None)
+    bot_number = (current_business or {}).get('phone_number', '')
+    clean_bot = str(bot_number).replace("whatsapp:", "").replace("+", "").strip()
+
+    order_row = {
+        "business_phone": clean_bot,
+        "client_name": str(customer_name or "").strip() or "הזמנה טלפונית",
+        "client_phone": str(customer_phone or "").strip(),
+        "order_details": order_details.strip(),
+        "delivery_method": method_norm,
+        "address": db_address,
+        "timing": timing_txt or "בהקדם",
+        "status": "new"
+    }
+
+    preview = (
+        f"🧾 *סיכום הזמנה לפני שליחה:*\n"
+        f"👤 לקוח: {order_row['client_name']}\n"
+        f"📞 טלפון: {order_row['client_phone'] or 'לא צוין'}\n"
+        f"🛍️ {method_he}\n"
+        f"📍 {db_address}\n"
+        f"⏰ מועד: {order_row['timing']}\n\n"
+        + "\n".join(preview_lines)
+        + f"\n\n💰 *סה\"כ: {total_price:.2f} ש\"ח*"
+    )
+    if warnings:
+        preview += "\n\n" + "\n".join(f"⚠️ {w}" for w in warnings)
+
+    return {"ok": True, "problems": [], "warnings": warnings, "preview": preview, "order_row": order_row}
+
+
+# --- TOOL 6: Preview Owner Order (validation only, does NOT save) ---
+def preview_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
+                        method: str = "", address: str = "", timing: str = ""):
+    """Validates an order the OWNER dictated over WhatsApp against the website products,
+    and returns a priced summary for approval. Does NOT save anything.
+    items_json: JSON list like [{"name": "אנטריקוט", "qty": 2}]. Optional per item:
+    "unit" ("ק\"ג" default, or "יח'"), "price" (manual price for items not on the site).
+    method: משלוח / איסוף. If anything is missing or ambiguous, the returned text says
+    exactly what to ask the owner."""
+    if not is_authorized_admin():
+        return ADMIN_DENIED_MSG
+
+    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing)
+    if not result["ok"]:
+        txt = "צריך להשלים כמה פרטים לפני שאפשר לשלוח:\n" + "\n".join(f"• {p}" for p in result["problems"])
+        if result["warnings"]:
+            txt += "\n" + "\n".join(f"⚠️ {w}" for w in result["warnings"])
+        return txt
+
+    return result["preview"] + "\n\nאם הכל נכון, אשר לי ואשלח את ההזמנה להדפסה בחנות. 🖨️"
+
+
+# --- TOOL 7: Submit Owner Order (saves to the site -> auto-printed) ---
+def submit_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
+                       method: str = "", address: str = "", timing: str = ""):
+    """FINAL step: saves the owner's dictated order into the website orders system,
+    which automatically sends it to the shop printer. Call ONLY after the owner
+    explicitly approved the preview from preview_owner_order, with the SAME details."""
+    if not is_authorized_admin():
+        return ADMIN_DENIED_MSG
+
+    if not supabase:
+        return "❌ אין חיבור לבסיס הנתונים - אי אפשר לשמור את ההזמנה."
+
+    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing)
+    if not result["ok"]:
+        return "עצור - עדיין חסרים פרטים:\n" + "\n".join(f"• {p}" for p in result["problems"])
+
+    try:
+        supabase.table('orders').insert(result["order_row"]).execute()
+        logger.info(f"Owner phone-order saved & queued for printing: {result['order_row']['client_name']}")
+        total_line = result["order_row"]["order_details"].splitlines()[-1]
+        return f"✅ ההזמנה נקלטה באתר ונשלחה להדפסה בחנות! 🖨️\n{total_line}"
+    except Exception as e:
+        logger.error(f"Failed to save owner phone-order: {e}")
+        return f"❌ שגיאה בשמירת ההזמנה: {e}"
+
+
 class SupabaseAgent:
     MAX_ACTIVE_CHATS = 500  # prevents unbounded RAM growth on a long-running server
 
@@ -303,12 +533,36 @@ class SupabaseAgent:
             # --- 3. INVENTORY MANAGEMENT LAYER (OWNER INSTRUCTION) ---
             sys_instruct += "\n[ניהול מלאי: אתה מנהל גם את החנות מאחורי הקלעים עבור הבעלים. יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), לעדכן מחירים (update_product_price), ולבדוק מה חסר כרגע (check_out_of_stock_inventory). הבעלים יכול פשוט לדבר איתך באופן טבעי (למשל: 'נגמר העוף' או 'תחזיר את האנטריקוט'). השתמש בכלים האלו מיד כשהוא מבקש, ואל תגיד שאתה לא מסוגל. המערכת תחסום לקוחות רגילים מלהשתמש בזה (יש חסימת אבטחה בקוד), אז אתה יכול להפעיל את הכלים בלי לחשוש שמדובר בלקוח.]"
 
+            # --- 4. IS THIS CHAT WITH THE OWNER? (unlocks phone-order dictation) ---
+            clean_user = str(user_phone).replace("whatsapp:", "").replace("+", "").strip()
+            owner_phone = str(config.get('owner_phone') or '').replace("whatsapp:", "").replace("+", "").strip()
+            is_owner_chat = clean_user in (([owner_phone] if owner_phone else []) + ADMIN_OVERRIDE_NUMBERS)
+
+            if is_owner_chat:
+                sys_instruct += (
+                    "\n[מצב בעלים - קליטת הזמנות טלפוניות: אתה משוחח כרגע עם בעל העסק (או מנהל מערכת), לא עם לקוח. "
+                    "כשהוא שולח לך הזמנה בטקסט חופשי (למשל: '2 קילו אנטריקוט וקילו טחון, איסוף ב-14:00 על שם יוסי') - "
+                    "אל תפנה אותו לאתר! במקום זה בצע את התהליך הבא:\n"
+                    "1. חלץ מההודעה: פריטים וכמויות, שם הלקוח, טלפון הלקוח (אם צוין), משלוח או איסוף, כתובת (אם משלוח), ושעה.\n"
+                    "2. קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
+                    "[{\"name\": \"אנטריקוט\", \"qty\": 2}]. אפשר להוסיף לפריט \"unit\" (ברירת מחדל ק\"ג, או יח') "
+                    "ו-\"price\" (מחיר ידני לפריט שלא קיים באתר).\n"
+                    "3. אם הפונקציה מחזירה שאלות או פרטים חסרים - שאל את הבעלים בקצרה רק על מה שחסר, ונסה שוב. אל תנחש לבד.\n"
+                    "4. כשהתצוגה המקדימה חוזרת תקינה - שלח לבעלים את הסיכום המלא (עם המחירים והסה\"כ) ושאל אם לאשר.\n"
+                    "5. רק אחרי אישור מפורש שלו ('כן', 'אשר', 'שלח') - קרא ל-submit_owner_order עם אותם פרטים בדיוק. "
+                    "ההזמנה תיקלט באתר ותודפס אוטומטית בחנות.\n"
+                    "לעולם אל תקרא ל-submit_owner_order בלי אישור מפורש, ולעולם אל תשלח הזמנה עם פרט שלא הבנת.]"
+                )
+
             # Evict the oldest session if we hit the cap
             if len(self.chats) >= self.MAX_ACTIVE_CHATS:
                 oldest = next(iter(self.chats))
                 del self.chats[oldest]
 
             tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price, check_out_of_stock_inventory]
+            if is_owner_chat:
+                # Owner-only tools: dictating phone orders straight to the website + printer
+                tools_list += [preview_owner_order, submit_owner_order]
             model = genai.GenerativeModel('gemini-2.5-flash', tools=tools_list, system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
 
