@@ -1,0 +1,37 @@
+{
+    "states": {
+        "START": {
+            "message": "שלום, הגעתם למשרד עורכי דין. באיזה נושא אפשר לעזור?",
+            "options": [
+                { "label": "גירושין", "next": "ASK_NAME" },
+                { "label": "משמורת ילדים", "next": "ASK_NAME" },
+                { "label": "הסכמי ממון", "next": "ASK_NAME" },
+                { "label": "צוואות וירושות", "next": "ASK_NAME" },
+                { "label": "תיאום פגישה", "next": "ASK_BOOKING" }
+            ]
+        },
+        "ASK_NAME": {
+            "message": "אשמח לעזור בנושא זה. כדי שנתקדם, מה שמך המלא?",
+            "allow_free_text": true,
+            "next": "ASK_DETAILS"
+        },
+        "ASK_DETAILS": {
+            "message": "נעים להכיר. אנא תאר בקצרה את המקרה או השאלה המשפטית שלך.",
+            "allow_free_text": true,
+            "next": "FINISH"
+        },
+        "ASK_BOOKING": {
+            "message": "בשמחה. לאיזה יום ושעה תרצה לתאם פגישה?",
+            "allow_free_text": true,
+            "next": "FINISH_BOOKING"
+        },
+        "FINISH": {
+            "message": "תודה רבה. קיבלנו את הפרטים ועורך הדין יחזור אליך בהקדם.",
+            "action": "save_lead"
+        },
+        "FINISH_BOOKING": {
+            "message": "רשמתי את הבקשה ביומן. ניצור קשר לאישור סופי. תודה!",
+            "action": "book_meeting"
+        }
+    }
+}
