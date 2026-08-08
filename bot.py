@@ -470,61 +470,209 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
     return {"ok": True, "problems": [], "warnings": warnings, "preview": preview, "order_row": order_row}
 
 
-# --- TOOL 6: Preview Owner Order (validation only, does NOT save) ---
-def preview_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
-                        method: str = "", address: str = "", timing: str = "", notes: str = ""):
-    """Validates an order the OWNER dictated over WhatsApp against the website products,
-    and returns a priced summary for approval. Does NOT save anything.
-    items_json: JSON list like [{"name": "אנטריקוט", "qty": 2}]. Optional per item:
-    "unit" ("ק\"ג" default, or "יח'"), "price" (manual price for items not on the site),
-    "note" (prep request like "חתוך קטן"). notes: order-level note (goes to the printed
-    הערות field). Only items + customer_name are required; method defaults to pickup.
-    If the response starts with ❓ those are QUESTIONS to relay to the owner, not an error."""
-    if not is_authorized_admin():
-        return ADMIN_DENIED_MSG
+# ==============================================================================
+#        OWNER ORDER STATE MACHINE (DETERMINISTIC - THE AI ONLY EXTRACTS)
+# ==============================================================================
+# Reliability design: Gemini is used for ONE thing only - reading a Hebrew
+# message and returning structured JSON. Everything else is plain Python:
+# the draft order lives in code, code decides what's missing, code asks the
+# questions, code waits for an explicit approval word, and code inserts the
+# order row. The model cannot forget items, invent requirements, refuse, or
+# submit without approval, because none of that is up to the model.
 
-    logger.info(f"preview_owner_order: items={items_json} | name={customer_name} | method={method} | "
-                f"addr={address} | time={timing} | notes={notes}")
+owner_order_drafts = {}          # key: f"{bot}_{sender}" -> {"data", "pending", "stage", "ts"}
+OWNER_DRAFT_TTL = 1800           # a draft dies after 30 minutes of silence
+OWNER_DRAFT_MAX = 200
 
-    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing, notes)
-    if not result["ok"]:
-        txt = "❓ חסרים לי פרטים. שאל את הבעלים:\n" + "\n".join(f"• {p}" for p in result["problems"])
-        if result["warnings"]:
-            txt += "\n" + "\n".join(f"⚠️ {w}" for w in result["warnings"])
-        txt += "\n\n[הנחיה למודל: אלו שאלות רגילות לבעלים - העבר אותן כפי שהן. זו איננה תקלה, אל תגיד 'משהו השתבש'.]"
-        return txt
+APPROVAL_WORDS = {"כן", "אשר", "מאשר", "אישור", "אושר", "שלח", "תשלח", "סגור", "אוקיי", "אוקי",
+                  "יאללה", "בסדר", "טוב", "מעולה", "ok", "yes", "v", "תדפיס", "הדפס"}
+CANCEL_WORDS = {"בטל", "ביטול", "תבטל", "לבטל", "עזוב", "לא צריך", "בטל הזמנה"}
+REJECT_WORDS = {"לא", "רגע", "שניה", "שנייה"}
 
-    return result["preview"] + "\n\nאם הכל נכון, אשר לי ואשלח את ההזמנה להדפסה. 🖨️"
+# Messages that LOOK like they might contain/start an order (quantities, order verbs).
+ORDERISH_RE = re.compile(r'\d|קילו|ק"ג|ק״ג|גרם|יח\'|יחיד|חצי|רבע|הזמנ|תרשום|לרשום|רשום|להדפיס|תדפיס')
 
+EXTRACTION_SYS = """אתה מחלץ נתוני הזמנה מהודעות וואטסאפ של בעל עסק מזון. החזר JSON בלבד, בלי שום טקסט נוסף.
+קלט: DRAFT (מצב ההזמנה עד עכשיו), QUESTIONS (שאלות פתוחות לבעלים), MESSAGE (ההודעה החדשה שלו).
+סכמה להחזרה:
+{"unrelated": bool, "cancel": bool,
+ "items": [{"name": str, "qty": number|null, "unit": "ק\\"ג"|"יח'", "note": str, "price": number|null}],
+ "customer_name": str, "method": ""|"משלוח"|"איסוף", "address": str, "timing": str, "notes": str}
+כללים:
+1. מזג! שמור על כל הנתונים הקיימים ב-DRAFT, ורק הוסף/עדכן לפי MESSAGE. לעולם אל תמחק פריטים קיימים אלא אם הבעלים ביקש להסיר.
+2. אם MESSAGE עונה על שאלה מ-QUESTIONS - יישם את התשובה. דוגמאות: פריט "לבבות" + תשובה "עוף" => שם הפריט הופך "לבבות עוף". שאלה "על איזה שם" + הודעה "יהל" => customer_name="יהל". שאלה "כמה חזה עוף" + "2" => qty=2 לאותו פריט.
+3. qty מספר (2, 0.5). "חצי"=0.5, "רבע"=0.25, "קילו וחצי"=1.5. אם לא נאמרה כמות לפריט - null. unit ברירת מחדל ק"ג; "יח'" רק אם נאמר במפורש יחידות/חבילות.
+4. בקשות עיבוד ("פרוס דק", "חתוך קטן", "טחון פעמיים", "ואקום", "בלי עצם") => note של הפריט המתאים. הערה כללית => notes.
+5. "על שם X" / "בשביל X" / "ל-X" => customer_name. עיר/רחוב/מספר בית => address וגם method="משלוח" אם ברור. שעה ("ל-14:00", "לשלוש") => timing.
+6. unrelated=true רק אם ההודעה לא קשורה בכלל להזמנה (למשל פקודת מלאי כמו "נגמר העוף", או שאלה כללית) - ואז החזר את DRAFT כמו שהוא.
+7. cancel=true אם הבעלים מבטל את ההזמנה.
+8. אל תמציא שום פריט, כמות או פרט שלא נאמרו במפורש."""
 
-# --- TOOL 7: Submit Owner Order (saves to the site -> auto-printed) ---
-def submit_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
-                       method: str = "", address: str = "", timing: str = "", notes: str = ""):
-    """FINAL step: saves the owner's dictated order into the website orders system,
-    which automatically sends it to the shop printer. Call ONLY after the owner
-    explicitly approved the preview from preview_owner_order, with the SAME details."""
-    if not is_authorized_admin():
-        return ADMIN_DENIED_MSG
+_extraction_model = None
 
-    if not supabase:
-        return "❌ אין חיבור לבסיס הנתונים - אי אפשר לשמור את ההזמנה."
+def get_extraction_model():
+    global _extraction_model
+    if _extraction_model is None and GOOGLE_API_KEY:
+        _extraction_model = genai.GenerativeModel(
+            'gemini-2.5-flash',
+            system_instruction=EXTRACTION_SYS,
+            generation_config={"response_mime_type": "application/json", "temperature": 0}
+        )
+    return _extraction_model
 
-    logger.info(f"submit_owner_order: items={items_json} | name={customer_name} | method={method} | "
-                f"addr={address} | time={timing} | notes={notes}")
+def _empty_draft_data():
+    return {"items": [], "customer_name": "", "customer_phone": "",
+            "method": "", "address": "", "timing": "", "notes": ""}
 
-    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing, notes)
-    if not result["ok"]:
-        return ("❓ אי אפשר לשלוח עדיין, שאל את הבעלים:\n" + "\n".join(f"• {p}" for p in result["problems"])
-                + "\n\n[הנחיה למודל: העבר את השאלות לבעלים כפי שהן. זו איננה תקלה.]")
-
+def extract_order_update(draft_data, pending_questions, msg):
+    """One LLM call: merge the new message into the draft. Returns dict or None on failure."""
+    model = get_extraction_model()
+    if not model:
+        return None
+    payload = json.dumps({"DRAFT": draft_data, "QUESTIONS": pending_questions, "MESSAGE": msg},
+                         ensure_ascii=False)
     try:
-        supabase.table('orders').insert(result["order_row"]).execute()
-        logger.info(f"Owner phone-order saved & queued for printing: {result['order_row']['client_name']}")
-        total_line = result["order_row"]["order_details"].splitlines()[-1]
-        return f"✅ ההזמנה נקלטה באתר ונשלחה להדפסה בחנות! 🖨️\n{total_line}"
+        raw = model.generate_content(payload).text or ""
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("not a dict")
+        return data
+    except Exception as e:
+        logger.error(f"Order extraction failed: {e}")
+        return None
+
+def _merge_extraction(old, ext):
+    """Defensive merge: never let a flaky extraction wipe data we already had."""
+    new = _empty_draft_data()
+    items = ext.get("items")
+    new["items"] = items if isinstance(items, list) and items else old.get("items", [])
+    for f in ["customer_name", "customer_phone", "method", "address", "timing", "notes"]:
+        val = str(ext.get(f) or "").strip()
+        new[f] = val if val else str(old.get(f) or "").strip()
+    return new
+
+def _validate_draft(data):
+    """Runs the same resolver used for pricing/format. Returns the resolver result."""
+    return _resolve_owner_order(json.dumps(data.get("items", []), ensure_ascii=False),
+                                data.get("customer_name", ""), data.get("customer_phone", ""),
+                                data.get("method", ""), data.get("address", ""),
+                                data.get("timing", ""), data.get("notes", ""))
+
+def _insert_owner_order(order_row):
+    try:
+        supabase.table('orders').insert(order_row).execute()
+        logger.info(f"Owner phone-order saved & queued for printing: {order_row['client_name']}")
+        return True, order_row["order_details"].splitlines()[-1]
     except Exception as e:
         logger.error(f"Failed to save owner phone-order: {e}")
-        return f"❌ שגיאה בשמירת ההזמנה: {e}"
+        return False, str(e)
+
+def _twiml(text):
+    resp = MessagingResponse()
+    resp.message(text)
+    return str(resp)
+
+def _norm_word(msg):
+    return re.sub(r'[!.,🙏👍✅🖨️\s]+$', '', msg.strip()).strip().lower()
+
+def try_handle_owner_order(sender, msg, bot_number):
+    """Deterministic owner order flow. Returns a TwiML string, or None to let the
+    normal flow (AI agent / inventory) handle the message."""
+    business = get_business_from_supabase(bot_number)
+    if not business:
+        return None
+
+    clean_sender = str(sender).replace("whatsapp:", "").replace("+", "").strip()
+    owner_phone = str(business.get('owner_phone') or '').replace("whatsapp:", "").replace("+", "").strip()
+    if clean_sender not in (([owner_phone] if owner_phone else []) + ADMIN_OVERRIDE_NUMBERS):
+        return None  # not the owner -> customers never reach this flow
+
+    key = f"{str(bot_number).strip()}_{clean_sender}"
+    now = time.time()
+
+    # TTL cleanup + size cap
+    for k in [k for k, d in owner_order_drafts.items() if now - d["ts"] > OWNER_DRAFT_TTL]:
+        del owner_order_drafts[k]
+    if len(owner_order_drafts) > OWNER_DRAFT_MAX:
+        owner_order_drafts.pop(next(iter(owner_order_drafts)), None)
+
+    draft = owner_order_drafts.get(key)
+    word = _norm_word(msg)
+
+    # No active draft: only step in if the message looks like an order
+    if draft is None:
+        if not ORDERISH_RE.search(msg):
+            return None  # inventory commands / chit-chat -> normal AI agent, fast
+        ext = extract_order_update(_empty_draft_data(), [], msg)
+        if not ext or ext.get("unrelated") or ext.get("cancel"):
+            return None  # not an order after all -> normal AI agent
+        data = _merge_extraction(_empty_draft_data(), ext)
+        if not data["items"]:
+            return None  # numbers but no products (e.g. "תעדכן מחיר ל-79") -> normal agent
+        draft = {"data": data, "pending": [], "stage": "collecting", "ts": now}
+        owner_order_drafts[key] = draft
+        return _twiml(_advance_draft(business, key, draft))
+
+    # --- Active draft from here on ---
+    draft["ts"] = now
+
+    if word in CANCEL_WORDS or any(w in word for w in ["בטל", "ביטול"]):
+        del owner_order_drafts[key]
+        return _twiml("ההזמנה בוטלה 👍")
+
+    if draft["stage"] == "confirm":
+        if word in APPROVAL_WORDS:
+            g.business_config = business
+            result = _validate_draft(draft["data"])
+            if not result["ok"]:  # should not happen, but never submit a broken order
+                draft["stage"] = "collecting"
+                draft["pending"] = result["problems"]
+                return _twiml(_format_questions(result["problems"]))
+            if not supabase:
+                return _twiml("❌ אין חיבור לבסיס הנתונים - אי אפשר לשמור את ההזמנה.")
+            ok, info = _insert_owner_order(result["order_row"])
+            del owner_order_drafts[key]
+            if ok:
+                return _twiml(f"✅ נשלח להדפסה! 🖨️\n{info}")
+            return _twiml(f"❌ שגיאה בשמירת ההזמנה: {info}")
+        if word in REJECT_WORDS:
+            draft["stage"] = "collecting"
+            return _twiml("מה לשנות?")
+        # anything else at the confirm stage = an edit ("תוסיף קילו טחון", "בעצם משלוח")
+
+    # Collecting (or editing): merge the message into the draft
+    ext = extract_order_update(draft["data"], draft["pending"], msg)
+    if ext is None:
+        return _twiml("לא הצלחתי לקרוא את זה, נסה לנסח שוב 🙏")
+    if ext.get("cancel"):
+        del owner_order_drafts[key]
+        return _twiml("ההזמנה בוטלה 👍")
+    if ext.get("unrelated"):
+        return None  # e.g. "נגמר העוף" mid-order -> inventory agent handles it, draft survives
+
+    draft["data"] = _merge_extraction(draft["data"], ext)
+    return _twiml(_advance_draft(business, key, draft))
+
+def _format_questions(problems):
+    if len(problems) == 1:
+        return problems[0]
+    return "\n".join(f"• {p}" for p in problems)
+
+def _advance_draft(business, key, draft):
+    """Validate the draft; either ask exactly what's missing or show the preview."""
+    g.business_config = business
+    result = _validate_draft(draft["data"])
+    if not result["ok"]:
+        draft["stage"] = "collecting"
+        draft["pending"] = result["problems"]
+        txt = _format_questions(result["problems"])
+        if result["warnings"]:
+            txt += "\n" + "\n".join(f"⚠️ {w}" for w in result["warnings"])
+        return txt
+    draft["stage"] = "confirm"
+    draft["pending"] = []
+    return result["preview"] + "\n\nלאשר? ✅"
 
 
 class SupabaseAgent:
@@ -536,32 +684,15 @@ class SupabaseAgent:
     # Supabase without touching code (same pattern as 'system_instruction').
     DEFAULT_OWNER_SYSTEM_PROMPT = (
         "אתה העוזר התפעולי החכם של העסק. אתה משוחח כרגע עם *בעל העסק* (או מנהל מערכת) - לא עם לקוח!\n"
-        "חוק ברזל: ענה אך ורק בעברית (אנגלית מותרת רק לשמות פונקציות טכניות).\n"
-        "לעולם אל תפנה את הבעלים לאתר ואל תשלח לו קישורים - זה האתר שלו.\n\n"
+        "חוק ברזל: ענה אך ורק בעברית. לעולם אל תפנה את הבעלים לאתר ואל תשלח לו קישורים - זה האתר שלו.\n\n"
         "היכולות שלך עבור הבעלים:\n\n"
-        "1. *קליטת הזמנה טלפונית והדפסתה בעסק (הכי חשוב):*\n"
-        "כשהבעלים מבקש לרשום, להזמין או להדפיס הזמנה - שאל 'בכיף! מה ההזמנה?' אם אין פרטים.\n"
-        "חובה רק שני דברים: *הפריטים עם הכמויות* + *שם הלקוח*. שום דבר אחר לא חובה!\n"
-        "ברירות מחדל אוטומטיות: איסוף עצמי, בהקדם. אל תשאל על משלוח/איסוף, שעה, טלפון או כתובת - "
-        "אלא אם הבעלים אמר בעצמו 'משלוח', ואז חסרה רק הכתובת.\n"
-        "בקשות מיוחדות ('חתוך קטן', 'טחון פעמיים', 'ואקום') - אל תשאל עליהן! צרף אותן ב-\"note\" של הפריט, "
-        "או בפרמטר notes אם זה על כל ההזמנה. הן יודפסו בשדה ההערות.\n"
-        "- ברגע שיש פריטים ושם - קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
-        "[{\"name\": \"אנטריקוט\", \"qty\": 2, \"note\": \"חתוך קטן\"}]. אפשר גם \"unit\" (ברירת מחדל ק\"ג, או יח') "
-        "ו-\"price\" (מחיר ידני לפריט שלא קיים באתר).\n"
-        "- בכל קריאה שלח תמיד את *כל* רשימת הפריטים שנאספה מתחילת השיחה, לא רק את החדשים.\n"
-        "- אם הכלי מחזיר טקסט שמתחיל ב-❓ - אלו שאלות הבהרה רגילות (למשל: 'לבבות עוף או עגל?'). "
-        "העבר אותן לבעלים כמו שהן. זו *לא* תקלה - לעולם אל תגיד 'משהו השתבש' או 'יש תקלה במערכת'.\n"
-        "- אם הבעלים נותן מידע מיותר או סותר - קבל את הגרסה האחרונה בשקט, בלי להתווכח ובלי לחקור אותו.\n"
-        "- כשחוזר סיכום (🧾) - הצג אותו לבעלים ושאל אם לאשר.\n"
-        "- רק אחרי אישור מפורש ('כן', 'אשר', 'שלח') - קרא ל-submit_owner_order עם אותם פרטים בדיוק. "
-        "ההזמנה תיקלט במערכת ותודפס אוטומטית בעסק.\n"
-        "אסור לך לאשר במקום הבעלים, לנחש פרטים חסרים, או לשלוח הזמנה בלי אישור מפורש.\n\n"
-        "2. *ניהול מלאי ומחירים:* יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), "
+        "1. *ניהול מלאי ומחירים:* יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), "
         "לעדכן מחיר (update_product_price), ולבדוק מה חסר (check_out_of_stock_inventory). "
         "הבעלים מדבר טבעי ('נגמר העוף', 'תחזיר את האנטריקוט') - פעל מיד, אל תגיד שאתה לא מסוגל.\n\n"
-        "3. *פתק חופשי למדפסת:* אם הבעלים רוצה להדפיס טקסט חופשי שאינו הזמנה, הסבר לו שיתחיל הודעה במילה "
-        "\"הדפס\" ואחריה הטקסט, והיא תודפס ישירות בעסק.\n\n"
+        "2. *הזמנות טלפוניות:* מערכת נפרדת קולטת אוטומטית הודעות הזמנה של הבעלים (פריטים וכמויות), "
+        "מתמחרת מול האתר ושולחת להדפסה. אם הבעלים שואל איך רושמים הזמנה - ענה בקצרה: "
+        "'פשוט שלח לי את ההזמנה, למשל: 2 קילו אנטריקוט על שם יוסי'. אל תנסה לטפל בהזמנה בעצמך.\n\n"
+        "3. *פתק חופשי למדפסת:* להדפסת טקסט חופשי שאינו הזמנה - שיתחיל הודעה במילה \"הדפס\" ואחריה הטקסט.\n\n"
         "סגנון: קצר, ישראלי, תכל'ס ('סגור', 'בכיף'). בלי חפירות ובלי פסקאות ארוכות."
     )
 
@@ -596,7 +727,7 @@ class SupabaseAgent:
                 sys_instruct = str(config.get('owner_system_instruction') or '').strip() or self.DEFAULT_OWNER_SYSTEM_PROMPT
                 sys_instruct += f"\n\n[מידע מערכת: התאריך והשעה כרגע בישראל: {time_str}.]"
                 tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price,
-                              check_out_of_stock_inventory, preview_owner_order, submit_owner_order]
+                              check_out_of_stock_inventory]
             else:
                 # ==========================================================
                 # CUSTOMER MODE: exactly the original behavior, untouched.
@@ -743,6 +874,12 @@ def main_router():
     note_response = try_handle_print_note(sender, incoming_msg, bot_number)
     if note_response:
         return note_response
+
+    # Owner phone-orders (deterministic state machine) - before the AI agent.
+    # Returns None for customers and for owner messages that aren't order-related.
+    order_response = try_handle_owner_order(sender, incoming_msg, bot_number)
+    if order_response:
+        return order_response
 
     return handle_supabase_flow(sender, incoming_msg, bot_number)
 
