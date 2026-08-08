@@ -510,6 +510,34 @@ def submit_owner_order(items_json: str, customer_name: str = "", customer_phone:
 class SupabaseAgent:
     MAX_ACTIVE_CHATS = 500  # prevents unbounded RAM growth on a long-running server
 
+    # Generic owner-mode prompt. Used as a FALLBACK for any business that has no
+    # 'owner_system_instruction' value in its clients row - so the system works
+    # out of the box for every tenant, and can be customized per business in
+    # Supabase without touching code (same pattern as 'system_instruction').
+    DEFAULT_OWNER_SYSTEM_PROMPT = (
+        "אתה העוזר התפעולי החכם של העסק. אתה משוחח כרגע עם *בעל העסק* (או מנהל מערכת) - לא עם לקוח!\n"
+        "חוק ברזל: ענה אך ורק בעברית (אנגלית מותרת רק לשמות פונקציות טכניות).\n"
+        "לעולם אל תפנה את הבעלים לאתר ואל תשלח לו קישורים - זה האתר שלו.\n\n"
+        "היכולות שלך עבור הבעלים:\n\n"
+        "1. *קליטת הזמנה טלפונית והדפסתה בעסק (הכי חשוב):*\n"
+        "כשהבעלים מבקש לרשום, להזמין או להדפיס הזמנה - גם בלי פרטים - שאל: 'בכיף! מה ההזמנה?' ואסוף:\n"
+        "פריטים וכמויות, שם הלקוח, טלפון הלקוח (אופציונלי), משלוח או איסוף, כתובת (אם משלוח), ושעה.\n"
+        "- קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
+        "[{\"name\": \"אנטריקוט\", \"qty\": 2}]. אפשר להוסיף לפריט \"unit\" (ברירת מחדל ק\"ג, או יח') "
+        "ו-\"price\" (מחיר ידני לפריט שלא קיים באתר).\n"
+        "- אם הפונקציה מחזירה שאלות או פרטים חסרים - שאל את הבעלים בקצרה רק על מה שחסר, ונסה שוב. אל תנחש לבד.\n"
+        "- כשהתצוגה המקדימה תקינה - שלח לבעלים את הסיכום המלא (עם המחירים והסה\"כ) ושאל אם לאשר.\n"
+        "- רק אחרי אישור מפורש ('כן', 'אשר', 'שלח') - קרא ל-submit_owner_order עם אותם פרטים בדיוק. "
+        "ההזמנה תיקלט במערכת ותודפס אוטומטית בעסק.\n"
+        "אסור לך לאשר במקום הבעלים, לנחש פרטים, או לשלוח הזמנה בלי אישור מפורש.\n\n"
+        "2. *ניהול מלאי ומחירים:* יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), "
+        "לעדכן מחיר (update_product_price), ולבדוק מה חסר (check_out_of_stock_inventory). "
+        "הבעלים מדבר טבעי ('נגמר העוף', 'תחזיר את האנטריקוט') - פעל מיד, אל תגיד שאתה לא מסוגל.\n\n"
+        "3. *פתק חופשי למדפסת:* אם הבעלים רוצה להדפיס טקסט חופשי שאינו הזמנה, הסבר לו שיתחיל הודעה במילה "
+        "\"הדפס\" ואחריה הטקסט, והיא תודפס ישירות בעסק.\n\n"
+        "סגנון: קצר, ישראלי, תכל'ס ('סגור', 'בכיף'). בלי חפירות ובלי פסקאות ארוכות."
+    )
+
     def __init__(self):
         self.chats = {}
 
@@ -517,52 +545,51 @@ class SupabaseAgent:
         chat_id = f"{config['phone_number']}_{user_phone}"
 
         if chat_id not in self.chats or msg.lower() == "reset":
-            sys_instruct = config.get('system_instruction', 'You are a helpful assistant.')
+            # --- WHO ARE WE TALKING TO? ---
+            clean_user = str(user_phone).replace("whatsapp:", "").replace("+", "").strip()
+            owner_phone = str(config.get('owner_phone') or '').replace("whatsapp:", "").replace("+", "").strip()
+            is_owner_chat = clean_user in (([owner_phone] if owner_phone else []) + ADMIN_OVERRIDE_NUMBERS)
+            logger.info(f"OWNER CHAT CHECK: sender={clean_user} | owner_in_db={owner_phone} | is_owner={is_owner_chat}")
 
-            # --- 1. TIME INJECTION (ISRAEL TIME) ---
+            # --- TIME (ISRAEL) ---
             if ISRAEL_TZ:
                 israel_time = datetime.datetime.now(ISRAEL_TZ)
             else:
                 israel_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
             time_str = israel_time.strftime("%d/%m/%Y %H:%M")
-            sys_instruct += f"\n\n[מידע מערכת חסוי: התאריך והשעה כרגע בישראל: {time_str}.]"
-
-            # --- 2. THE GOD-MODE OVERRIDE ---
-            sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
-
-            # --- 3. INVENTORY MANAGEMENT LAYER (OWNER INSTRUCTION) ---
-            sys_instruct += "\n[ניהול מלאי: אתה מנהל גם את החנות מאחורי הקלעים עבור הבעלים. יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), לעדכן מחירים (update_product_price), ולבדוק מה חסר כרגע (check_out_of_stock_inventory). הבעלים יכול פשוט לדבר איתך באופן טבעי (למשל: 'נגמר העוף' או 'תחזיר את האנטריקוט'). השתמש בכלים האלו מיד כשהוא מבקש, ואל תגיד שאתה לא מסוגל. המערכת תחסום לקוחות רגילים מלהשתמש בזה (יש חסימת אבטחה בקוד), אז אתה יכול להפעיל את הכלים בלי לחשוש שמדובר בלקוח.]"
-
-            # --- 4. IS THIS CHAT WITH THE OWNER? (unlocks phone-order dictation) ---
-            clean_user = str(user_phone).replace("whatsapp:", "").replace("+", "").strip()
-            owner_phone = str(config.get('owner_phone') or '').replace("whatsapp:", "").replace("+", "").strip()
-            is_owner_chat = clean_user in (([owner_phone] if owner_phone else []) + ADMIN_OVERRIDE_NUMBERS)
 
             if is_owner_chat:
-                sys_instruct += (
-                    "\n[מצב בעלים - קליטת הזמנות טלפוניות: אתה משוחח כרגע עם בעל העסק (או מנהל מערכת), לא עם לקוח. "
-                    "כשהוא שולח לך הזמנה בטקסט חופשי (למשל: '2 קילו אנטריקוט וקילו טחון, איסוף ב-14:00 על שם יוסי') - "
-                    "אל תפנה אותו לאתר! במקום זה בצע את התהליך הבא:\n"
-                    "1. חלץ מההודעה: פריטים וכמויות, שם הלקוח, טלפון הלקוח (אם צוין), משלוח או איסוף, כתובת (אם משלוח), ושעה.\n"
-                    "2. קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
-                    "[{\"name\": \"אנטריקוט\", \"qty\": 2}]. אפשר להוסיף לפריט \"unit\" (ברירת מחדל ק\"ג, או יח') "
-                    "ו-\"price\" (מחיר ידני לפריט שלא קיים באתר).\n"
-                    "3. אם הפונקציה מחזירה שאלות או פרטים חסרים - שאל את הבעלים בקצרה רק על מה שחסר, ונסה שוב. אל תנחש לבד.\n"
-                    "4. כשהתצוגה המקדימה חוזרת תקינה - שלח לבעלים את הסיכום המלא (עם המחירים והסה\"כ) ושאל אם לאשר.\n"
-                    "5. רק אחרי אישור מפורש שלו ('כן', 'אשר', 'שלח') - קרא ל-submit_owner_order עם אותם פרטים בדיוק. "
-                    "ההזמנה תיקלט באתר ותודפס אוטומטית בחנות.\n"
-                    "לעולם אל תקרא ל-submit_owner_order בלי אישור מפורש, ולעולם אל תשלח הזמנה עם פרט שלא הבנת.]"
-                )
+                # ==========================================================
+                # OWNER MODE: per-business prompt from the clients row
+                # ('owner_system_instruction'), or the generic default.
+                # The customer-facing script from 'system_instruction' is
+                # NOT loaded at all, so its "never collect order details /
+                # always send to the website" rules can't leak in here.
+                # ==========================================================
+                sys_instruct = str(config.get('owner_system_instruction') or '').strip() or self.DEFAULT_OWNER_SYSTEM_PROMPT
+                sys_instruct += f"\n\n[מידע מערכת: התאריך והשעה כרגע בישראל: {time_str}.]"
+                tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price,
+                              check_out_of_stock_inventory, preview_owner_order, submit_owner_order]
+            else:
+                # ==========================================================
+                # CUSTOMER MODE: exactly the original behavior, untouched.
+                # ==========================================================
+                sys_instruct = config.get('system_instruction', 'You are a helpful assistant.')
+                sys_instruct += f"\n\n[מידע מערכת חסוי: התאריך והשעה כרגע בישראל: {time_str}.]"
+
+                # --- THE GOD-MODE OVERRIDE ---
+                sys_instruct += "\n[הוראת מערכת קריטית: מותר לך ואתה מסוגל לעדכן הזמנות קיימות! אם לקוח מבקש לשנות הזמנה שכבר ביצע באותה שיחה, פשוט אסוף את הפרטים החדשים והפעל שוב את הפונקציה save_order_supabase עם כל המידע המעודכן. לעולם אל תגיד ללקוח שאינך יכול לשנות הזמנה.]"
+
+                # --- INVENTORY MANAGEMENT LAYER (OWNER INSTRUCTION) ---
+                sys_instruct += "\n[ניהול מלאי: אתה מנהל גם את החנות מאחורי הקלעים עבור הבעלים. יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), לעדכן מחירים (update_product_price), ולבדוק מה חסר כרגע (check_out_of_stock_inventory). הבעלים יכול פשוט לדבר איתך באופן טבעי (למשל: 'נגמר העוף' או 'תחזיר את האנטריקוט'). השתמש בכלים האלו מיד כשהוא מבקש, ואל תגיד שאתה לא מסוגל. המערכת תחסום לקוחות רגילים מלהשתמש בזה (יש חסימת אבטחה בקוד), אז אתה יכול להפעיל את הכלים בלי לחשוש שמדובר בלקוח.]"
+
+                tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price, check_out_of_stock_inventory]
 
             # Evict the oldest session if we hit the cap
             if len(self.chats) >= self.MAX_ACTIVE_CHATS:
                 oldest = next(iter(self.chats))
                 del self.chats[oldest]
 
-            tools_list = [save_order_supabase, mark_out_of_stock, restock_product, update_product_price, check_out_of_stock_inventory]
-            if is_owner_chat:
-                # Owner-only tools: dictating phone orders straight to the website + printer
-                tools_list += [preview_owner_order, submit_owner_order]
             model = genai.GenerativeModel('gemini-2.5-flash', tools=tools_list, system_instruction=sys_instruct)
             self.chats[chat_id] = model.start_chat(enable_automatic_function_calling=True)
 
