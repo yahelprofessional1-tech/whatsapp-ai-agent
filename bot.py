@@ -305,9 +305,11 @@ def _strip_stock_suffix(name):
     return str(name or "").replace(" - אין במלאי", "").replace(" אין במלאי", "").strip()
 
 
-def _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing):
+def _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing, notes=""):
     """Shared validation for preview/submit. Returns a dict:
-    { ok, problems[], warnings[], preview, order_row } - order_row is ready to insert."""
+    { ok, problems[], warnings[], preview, order_row } - order_row is ready to insert.
+    Philosophy: only the ITEMS and the CUSTOMER NAME are mandatory. Everything else
+    gets a sensible default (pickup / ASAP) so the owner isn't interrogated."""
     problems = []
     warnings = []
 
@@ -320,20 +322,21 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
         return {"ok": False, "problems": ["items_json חייב להיות רשימת JSON של פריטים, למשל: "
                                           "[{\"name\": \"אנטריקוט\", \"qty\": 2}]"], "warnings": []}
 
-    # --- 2. Normalize delivery method ---
+    # --- 2. Delivery method: DEFAULT IS PICKUP. Never nag the owner about it. ---
     method_txt = str(method or "").strip()
     if "משלוח" in method_txt or "deliver" in method_txt.lower():
         method_norm = "delivery"
-    elif "איסוף" in method_txt or "pickup" in method_txt.lower() or "עצמי" in method_txt:
-        method_norm = "pickup"
     else:
-        method_norm = None
-        problems.append("לא צוין אם ההזמנה למשלוח או לאיסוף עצמי.")
+        method_norm = "pickup"
 
     if method_norm == "delivery" and not str(address or "").strip():
-        problems.append("הזמנה למשלוח - חסרה כתובת.")
+        problems.append("ההזמנה למשלוח - מה הכתובת?")
 
-    # --- 3. Resolve each item against the products table ---
+    # --- 3. Customer name is the ONE detail we do require ---
+    if not str(customer_name or "").strip():
+        problems.append("על איזה שם ההזמנה?")
+
+    # --- 4. Resolve each item against the products table ---
     resolved = []
     for it in items:
         if not isinstance(it, dict):
@@ -351,10 +354,11 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
             if qty <= 0:
                 raise ValueError
         except (TypeError, ValueError):
-            problems.append(f"חסרה כמות תקינה עבור '{raw_name}'.")
+            problems.append(f"כמה '{raw_name}'?")
             continue
 
         unit = str(it.get("unit", "")).strip() or "ק\"ג"
+        item_note = str(it.get("note", "")).strip()
         manual_price = _parse_price_value(it.get("price"))
 
         display_name = raw_name
@@ -377,12 +381,12 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
                 if len(exact) == 1:
                     matched = exact[0]
                 elif manual_price is None:
-                    options = ", ".join(_strip_stock_suffix(c.get('name')) for c in candidates[:5])
-                    problems.append(f"נמצאו כמה מוצרים שמתאימים ל-'{raw_name}': {options}. איזה מהם?")
+                    options = " / ".join(_strip_stock_suffix(c.get('name')) for c in candidates[:5])
+                    problems.append(f"'{raw_name}' יכול להיות: {options}. איזה מהם?")
                     continue
             elif not candidates and manual_price is None:
-                problems.append(f"לא מצאתי באתר מוצר בשם '{raw_name}'. "
-                                f"אפשר לתת שם מדויק יותר, או מחיר ידני כדי לרשום אותו כפריט חופשי.")
+                problems.append(f"לא מצאתי באתר מוצר בשם '{raw_name}'. מה השם המדויק, או מה המחיר "
+                                f"כדי שארשום אותו כפריט חופשי?")
                 continue
 
         if matched:
@@ -396,7 +400,8 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
             problems.append(f"לא הצלחתי לקרוא את המחיר של '{display_name}' מהאתר. מה המחיר ל{unit}?")
             continue
 
-        resolved.append({"name": display_name, "qty": qty, "unit": unit, "unit_price": unit_price})
+        resolved.append({"name": display_name, "qty": qty, "unit": unit,
+                         "unit_price": unit_price, "note": item_note})
 
     if not resolved and not problems:
         problems.append("לא זוהו פריטים בהזמנה.")
@@ -404,7 +409,7 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
     if problems:
         return {"ok": False, "problems": problems, "warnings": warnings}
 
-    # --- 4. Build the printer text in the SAME format as a website order ---
+    # --- 5. Build the printer text in the SAME format as a website order ---
     total_price = 0.0
     order_details = ""
     preview_lines = []
@@ -412,13 +417,15 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
         line_total = r["unit_price"] * r["qty"]
         total_price += line_total
         qty_str = f"{r['qty']:g}"
-        order_details += f"{r['name']} | {qty_str} {r['unit']} | {line_total:.2f} ש\"ח\n"
-        preview_lines.append(f"{i+1}. {r['name']} - {qty_str} {r['unit']} × ‏{r['unit_price']:.2f} = ‏{line_total:.2f} ש\"ח")
+        line_name = f"{r['name']} ({r['note']})" if r["note"] else r["name"]
+        order_details += f"{line_name} | {qty_str} {r['unit']} | {line_total:.2f} ש\"ח\n"
+        preview_lines.append(f"{i+1}. {line_name} - {qty_str} {r['unit']} × ‏{r['unit_price']:.2f} = ‏{line_total:.2f} ש\"ח")
 
     order_details += f"------------------------------\nסה\"כ לתשלום: {total_price:.2f} ש\"ח"
 
-    # --- 5. Address string, same convention as the web checkout ---
+    # --- 6. Address string, same convention as the web checkout (incl. notes) ---
     timing_txt = str(timing or "").strip()
+    notes_txt = str(notes or "").strip()
     if method_norm == "delivery":
         db_address = str(address).strip()
         method_he = "משלוח 🚚"
@@ -427,6 +434,9 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
         if timing_txt:
             db_address += f"\nשעת איסוף: {timing_txt}"
         method_he = "איסוף עצמי 🏬"
+    if notes_txt:
+        # Order-level notes land exactly where the website's 'הערה להזמנה' field goes
+        db_address += f"\nהערות: {notes_txt}"
 
     current_business = getattr(g, 'business_config', None)
     bot_number = (current_business or {}).get('phone_number', '')
@@ -446,10 +456,11 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
     preview = (
         f"🧾 *סיכום הזמנה לפני שליחה:*\n"
         f"👤 לקוח: {order_row['client_name']}\n"
-        f"📞 טלפון: {order_row['client_phone'] or 'לא צוין'}\n"
-        f"🛍️ {method_he}\n"
-        f"📍 {db_address}\n"
-        f"⏰ מועד: {order_row['timing']}\n\n"
+        f"🛍️ {method_he}"
+        + (f"\n📍 {db_address}" if method_norm == "delivery" else "")
+        + (f"\n⏰ {timing_txt}" if timing_txt else "")
+        + (f"\n📝 הערות: {notes_txt}" if notes_txt else "")
+        + "\n\n"
         + "\n".join(preview_lines)
         + f"\n\n💰 *סה\"כ: {total_price:.2f} ש\"ח*"
     )
@@ -461,29 +472,34 @@ def _resolve_owner_order(items_json, customer_name, customer_phone, method, addr
 
 # --- TOOL 6: Preview Owner Order (validation only, does NOT save) ---
 def preview_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
-                        method: str = "", address: str = "", timing: str = ""):
+                        method: str = "", address: str = "", timing: str = "", notes: str = ""):
     """Validates an order the OWNER dictated over WhatsApp against the website products,
     and returns a priced summary for approval. Does NOT save anything.
     items_json: JSON list like [{"name": "אנטריקוט", "qty": 2}]. Optional per item:
-    "unit" ("ק\"ג" default, or "יח'"), "price" (manual price for items not on the site).
-    method: משלוח / איסוף. If anything is missing or ambiguous, the returned text says
-    exactly what to ask the owner."""
+    "unit" ("ק\"ג" default, or "יח'"), "price" (manual price for items not on the site),
+    "note" (prep request like "חתוך קטן"). notes: order-level note (goes to the printed
+    הערות field). Only items + customer_name are required; method defaults to pickup.
+    If the response starts with ❓ those are QUESTIONS to relay to the owner, not an error."""
     if not is_authorized_admin():
         return ADMIN_DENIED_MSG
 
-    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing)
+    logger.info(f"preview_owner_order: items={items_json} | name={customer_name} | method={method} | "
+                f"addr={address} | time={timing} | notes={notes}")
+
+    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing, notes)
     if not result["ok"]:
-        txt = "צריך להשלים כמה פרטים לפני שאפשר לשלוח:\n" + "\n".join(f"• {p}" for p in result["problems"])
+        txt = "❓ חסרים לי פרטים. שאל את הבעלים:\n" + "\n".join(f"• {p}" for p in result["problems"])
         if result["warnings"]:
             txt += "\n" + "\n".join(f"⚠️ {w}" for w in result["warnings"])
+        txt += "\n\n[הנחיה למודל: אלו שאלות רגילות לבעלים - העבר אותן כפי שהן. זו איננה תקלה, אל תגיד 'משהו השתבש'.]"
         return txt
 
-    return result["preview"] + "\n\nאם הכל נכון, אשר לי ואשלח את ההזמנה להדפסה בחנות. 🖨️"
+    return result["preview"] + "\n\nאם הכל נכון, אשר לי ואשלח את ההזמנה להדפסה. 🖨️"
 
 
 # --- TOOL 7: Submit Owner Order (saves to the site -> auto-printed) ---
 def submit_owner_order(items_json: str, customer_name: str = "", customer_phone: str = "",
-                       method: str = "", address: str = "", timing: str = ""):
+                       method: str = "", address: str = "", timing: str = "", notes: str = ""):
     """FINAL step: saves the owner's dictated order into the website orders system,
     which automatically sends it to the shop printer. Call ONLY after the owner
     explicitly approved the preview from preview_owner_order, with the SAME details."""
@@ -493,9 +509,13 @@ def submit_owner_order(items_json: str, customer_name: str = "", customer_phone:
     if not supabase:
         return "❌ אין חיבור לבסיס הנתונים - אי אפשר לשמור את ההזמנה."
 
-    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing)
+    logger.info(f"submit_owner_order: items={items_json} | name={customer_name} | method={method} | "
+                f"addr={address} | time={timing} | notes={notes}")
+
+    result = _resolve_owner_order(items_json, customer_name, customer_phone, method, address, timing, notes)
     if not result["ok"]:
-        return "עצור - עדיין חסרים פרטים:\n" + "\n".join(f"• {p}" for p in result["problems"])
+        return ("❓ אי אפשר לשלוח עדיין, שאל את הבעלים:\n" + "\n".join(f"• {p}" for p in result["problems"])
+                + "\n\n[הנחיה למודל: העבר את השאלות לבעלים כפי שהן. זו איננה תקלה.]")
 
     try:
         supabase.table('orders').insert(result["order_row"]).execute()
@@ -520,16 +540,23 @@ class SupabaseAgent:
         "לעולם אל תפנה את הבעלים לאתר ואל תשלח לו קישורים - זה האתר שלו.\n\n"
         "היכולות שלך עבור הבעלים:\n\n"
         "1. *קליטת הזמנה טלפונית והדפסתה בעסק (הכי חשוב):*\n"
-        "כשהבעלים מבקש לרשום, להזמין או להדפיס הזמנה - גם בלי פרטים - שאל: 'בכיף! מה ההזמנה?' ואסוף:\n"
-        "פריטים וכמויות, שם הלקוח, טלפון הלקוח (אופציונלי), משלוח או איסוף, כתובת (אם משלוח), ושעה.\n"
-        "- קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
-        "[{\"name\": \"אנטריקוט\", \"qty\": 2}]. אפשר להוסיף לפריט \"unit\" (ברירת מחדל ק\"ג, או יח') "
+        "כשהבעלים מבקש לרשום, להזמין או להדפיס הזמנה - שאל 'בכיף! מה ההזמנה?' אם אין פרטים.\n"
+        "חובה רק שני דברים: *הפריטים עם הכמויות* + *שם הלקוח*. שום דבר אחר לא חובה!\n"
+        "ברירות מחדל אוטומטיות: איסוף עצמי, בהקדם. אל תשאל על משלוח/איסוף, שעה, טלפון או כתובת - "
+        "אלא אם הבעלים אמר בעצמו 'משלוח', ואז חסרה רק הכתובת.\n"
+        "בקשות מיוחדות ('חתוך קטן', 'טחון פעמיים', 'ואקום') - אל תשאל עליהן! צרף אותן ב-\"note\" של הפריט, "
+        "או בפרמטר notes אם זה על כל ההזמנה. הן יודפסו בשדה ההערות.\n"
+        "- ברגע שיש פריטים ושם - קרא ל-preview_owner_order. הפרמטר items_json הוא רשימת JSON, למשל: "
+        "[{\"name\": \"אנטריקוט\", \"qty\": 2, \"note\": \"חתוך קטן\"}]. אפשר גם \"unit\" (ברירת מחדל ק\"ג, או יח') "
         "ו-\"price\" (מחיר ידני לפריט שלא קיים באתר).\n"
-        "- אם הפונקציה מחזירה שאלות או פרטים חסרים - שאל את הבעלים בקצרה רק על מה שחסר, ונסה שוב. אל תנחש לבד.\n"
-        "- כשהתצוגה המקדימה תקינה - שלח לבעלים את הסיכום המלא (עם המחירים והסה\"כ) ושאל אם לאשר.\n"
+        "- בכל קריאה שלח תמיד את *כל* רשימת הפריטים שנאספה מתחילת השיחה, לא רק את החדשים.\n"
+        "- אם הכלי מחזיר טקסט שמתחיל ב-❓ - אלו שאלות הבהרה רגילות (למשל: 'לבבות עוף או עגל?'). "
+        "העבר אותן לבעלים כמו שהן. זו *לא* תקלה - לעולם אל תגיד 'משהו השתבש' או 'יש תקלה במערכת'.\n"
+        "- אם הבעלים נותן מידע מיותר או סותר - קבל את הגרסה האחרונה בשקט, בלי להתווכח ובלי לחקור אותו.\n"
+        "- כשחוזר סיכום (🧾) - הצג אותו לבעלים ושאל אם לאשר.\n"
         "- רק אחרי אישור מפורש ('כן', 'אשר', 'שלח') - קרא ל-submit_owner_order עם אותם פרטים בדיוק. "
         "ההזמנה תיקלט במערכת ותודפס אוטומטית בעסק.\n"
-        "אסור לך לאשר במקום הבעלים, לנחש פרטים, או לשלוח הזמנה בלי אישור מפורש.\n\n"
+        "אסור לך לאשר במקום הבעלים, לנחש פרטים חסרים, או לשלוח הזמנה בלי אישור מפורש.\n\n"
         "2. *ניהול מלאי ומחירים:* יש לך כלים להוריד מהמלאי (mark_out_of_stock), להחזיר למלאי (restock_product), "
         "לעדכן מחיר (update_product_price), ולבדוק מה חסר (check_out_of_stock_inventory). "
         "הבעלים מדבר טבעי ('נגמר העוף', 'תחזיר את האנטריקוט') - פעל מיד, אל תגיד שאתה לא מסוגל.\n\n"
